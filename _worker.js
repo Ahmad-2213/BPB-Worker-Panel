@@ -1935,7 +1935,7 @@ var configProviders = [
     type: "raw",
     random: false,
     urls: [
-      "https://raw.githubusercontent.com/Ahmad-2213/v2ray-worker-sub/main/dist/links33"
+      "https://raw.githubusercontent.com/Ahmad-2213/vsub/main/links"
     ]
   },
   {
