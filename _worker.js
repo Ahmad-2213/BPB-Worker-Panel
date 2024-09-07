@@ -1,3642 +1,2417 @@
-// @ts-nocheck
-// <!--GAMFC-->version base on commit 43fad05dcdae3b723c53c226f8181fc5bd47223e, time is 2023-06-22 15:20:02 UTC<!--GAMFC-END-->.
-// @ts-ignore
-// https://github.com/bia-pain-bache/BPB-Worker-Panel
+/*!
+  * v2ray Subscription Worker v1.7a
+  * Copyright 2023 Vahid Farid (https://twitter.com/vahidfarid)
+  * Licensed under GPLv3 (https://github.com/vfarid/v2ray-worker-sub/blob/main/Licence.md)
+  */
 
-import { connect } from 'cloudflare:sockets';
+var MAX_CONFIGS = 5000;
+var INCLUDE_ORIGINAL = false;
+var ONLY_ORIGINAL = false;
+var SELECTED_TYPES = ["vmess", "vless", "trojan"];
+var SELECTED_PROVIDERS = [];
 
-// How to generate your own UUID:
-// https://www.uuidgenerator.net/
-let userID = '89b3cbba-e6ac-485a-9481-976a0415eab9';
-
-// https://www.nslookup.io/domains/bpb.yousef.isegaro.com/dns-records/
-const proxyIPs= ['bpb.yousef.isegaro.com'];
-
-const defaultHttpPorts = ['80', '8080', '2052', '2082', '2086', '2095', '8880'];
-const defaultHttpsPorts = ['443', '8443', '2053', '2083', '2087', '2096'];
-
-let proxyIP = proxyIPs[Math.floor(Math.random() * proxyIPs.length)];
-
-let dohURL = 'https://cloudflare-dns.com/dns-query';
-
-let panelVersion = '2.5';
-
-if (!isValidUUID(userID)) {
-    throw new Error('uuid is not valid');
-}
-
-export default {
-    /**
-     * @param {import("@cloudflare/workers-types").Request} request
-     * @param {{UUID: string, PROXYIP: string, DNS_RESOLVER_URL: string}} env
-     * @param {import("@cloudflare/workers-types").ExecutionContext} ctx
-     * @returns {Promise<Response>}
-     */
-    async fetch(request, env, ctx) {
-        try {
-            
-            userID = env.UUID || userID;
-            proxyIP = env.PROXYIP || proxyIP;
-            dohURL = env.DNS_RESOLVER_URL || dohURL;
-            const upgradeHeader = request.headers.get('Upgrade');
-            
-            if (!upgradeHeader || upgradeHeader !== 'websocket') {
-                
-                const url = new URL(request.url);
-                const searchParams = new URLSearchParams(url.search);
-                const host = request.headers.get('Host');
-                const client = searchParams.get('app');
-
-                switch (url.pathname) {
-
-                    case '/cf':
-                        return new Response(JSON.stringify(request.cf, null, 4), {
-                            status: 200,
-                            headers: {
-                                'Content-Type': 'application/json;charset=utf-8',
-                            },
-                        });
-                        
-                    case '/warp-keys':
-
-                        const Auth = await Authenticate(request, env); 
-                        if (!Auth) return new Response('Unauthorized', { status: 401 });
-
-                        if (request.method === 'POST' && request.headers.get('content-type') === 'application/json') {
-                            try {
-                                const warpKeys = await request.json();
-                                const warpPlusError = await fetchWgConfig(env, warpKeys);
-                                if (warpPlusError) {
-                                    return new Response(warpPlusError, { status: 400 });
-                                } else {
-                                    return new Response('Warp configs updated successfully', { status: 200 });
-                                }
-                            } catch (error) {
-                                console.log(error);
-                                return new Response(`An error occurred while updating Warp configs! - ${error}`, { status: 500 });
-                            }
-
-                        } else {
-                            return new Response('Unsupported request', { status: 405 });
-                        }
-
-                    case `/sub/${userID}`:
-
-                        if (client === 'sfa') {
-                            const BestPingSFA = await getSingboxConfig(env, host);
-                            return new Response(`${JSON.stringify(BestPingSFA, null, 4)}`, { status: 200 });                            
-                        }
-                        const normalConfigs = await getNormalConfigs(env, host, client);
-                        return new Response(normalConfigs, { status: 200 });                        
-
-                    case `/fragsub/${userID}`:
-
-                        let fragConfigs = await getFragmentConfigs(env, host, 'v2ray');
-                        fragConfigs = fragConfigs.map(config => config.config);
-
-                        return new Response(`${JSON.stringify(fragConfigs, null, 4)}`, { status: 200 });
-
-                    case `/warpsub/${userID}`:
-
-                        const warpConfig = await getWarpConfigs(env, client);
-                        return new Response(`${JSON.stringify(warpConfig, null, 4)}`, { status: 200 });
-
-                    case '/panel':
-
-                        if (typeof env.bpb !== 'object') {
-                            const errorPage = renderErrorPage('KV Dataset is not properly set!', null, true);
-                            return new Response(errorPage, { status: 200, headers: {'Content-Type': 'text/html'}});
-                        }
-
-                        const pwd = await env.bpb.get('pwd');
-                        const isAuth = await Authenticate(request, env); 
-                        
-                        if (request.method === 'POST') {     
-                            if (!isAuth) return new Response('Unauthorized', { status: 401 });             
-                            const formData = await request.formData();
-                            await updateDataset(env, formData);
-
-                            return new Response('Success', { status: 200 });
-                        }
-                        
-                        if (pwd && !isAuth) return Response.redirect(`${url.origin}/login`, 302);
-                        const proxySettings = await env.bpb.get('proxySettings', {type: 'json'});
-                        const isUpdated = panelVersion === proxySettings?.panelVersion;
-                        if (!proxySettings || !isUpdated) await updateDataset(env);
-                        const fragConfs = await getFragmentConfigs(env, host, 'nekoray');
-                        const homePage = await renderHomePage(env, host, fragConfs);
-
-                        return new Response(homePage, {
-                            status: 200,
-                            headers: {
-                                'Content-Type': 'text/html',
-                                'Access-Control-Allow-Origin': url.origin,
-                                'Access-Control-Allow-Methods': 'GET, POST',
-                                'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-                                'X-Content-Type-Options': 'nosniff',
-                                'X-Frame-Options': 'DENY',
-                                'Referrer-Policy': 'strict-origin-when-cross-origin'
-                            }
-                        });
-                                                      
-                    case '/login':
-
-                        if (typeof env.bpb !== 'object') {
-                            const errorPage = renderErrorPage('KV Dataset is not properly set!', null, true);
-                            return new Response(errorPage, { status: 200, headers: {'Content-Type': 'text/html'}});
-                        }
-
-                        const loginAuth = await Authenticate(request, env);
-                        if (loginAuth) return Response.redirect(`${url.origin}/panel`, 302);
-
-                        let secretKey = await env.bpb.get('secretKey');
-                        if (!secretKey) {
-                            secretKey = generateSecretKey();
-                            await env.bpb.put('secretKey', secretKey);
-                        }
-
-                        if (request.method === 'POST') {
-                            const password = await request.text();
-                            const savedPass = await env.bpb.get('pwd');
-
-                            if (password === savedPass) {
-                                const jwtToken = generateJWTToken(password, secretKey);
-                                const cookieHeader = `jwtToken=${jwtToken}; HttpOnly; Secure; Max-Age=${7 * 24 * 60 * 60}; Path=/; SameSite=Strict`;
-                                
-                                return new Response('Success', {
-                                    status: 200,
-                                    headers: {
-                                      'Set-Cookie': cookieHeader,
-                                      'Content-Type': 'text/plain',
-                                    }
-                                });        
-                            } else {
-                                return new Response('Method Not Allowed', { status: 405 });
-                            }
-                        }
-                        
-                        const loginPage = await renderLoginPage();
-
-                        return new Response(loginPage, {
-                            status: 200,
-                            headers: {
-                                'Content-Type': 'text/html',
-                                'Access-Control-Allow-Origin': url.origin,
-                                'Access-Control-Allow-Methods': 'GET, POST',
-                                'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-                                'X-Content-Type-Options': 'nosniff',
-                                'X-Frame-Options': 'DENY',
-                                'Referrer-Policy': 'strict-origin-when-cross-origin'
-                            }
-                        });
-                    
-                    case '/logout':
-                                    
-                        return new Response('Success', {
-                            status: 200,
-                            headers: {
-                                'Set-Cookie': 'jwtToken=; Secure; SameSite=None; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
-                                'Content-Type': 'text/plain'
-                            }
-                        });        
-
-                    case '/panel/password':
-
-                        const oldPwd = await env.bpb.get('pwd');
-                        let passAuth = await Authenticate(request, env);
-                        if (oldPwd && !passAuth) return new Response('Unauthorized!', { status: 401 });           
-                        const newPwd = await request.text();
-                        if (newPwd === oldPwd) return new Response('Please enter a new Password!', { status: 400 });
-                        await env.bpb.put('pwd', newPwd);
-
-                        return new Response('Success', {
-                            status: 200,
-                            headers: {
-                                'Set-Cookie': 'jwtToken=; Path=/; Secure; SameSite=None; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
-                                'Content-Type': 'text/plain',
-                            }
-                        });
-
-                    default:
-                        // return new Response('Not found', { status: 404 });
-                        url.hostname = 'www.speedtest.net';
-                        url.protocol = 'https:';
-                        request = new Request(url, request);
-                        return await fetch(request);
-                }
-            } else {
-                return await vlessOverWSHandler(request);
-            }
-        } catch (err) {
-            /** @type {Error} */ let e = err;
-            const errorPage = renderErrorPage('Something went wrong!', e.message.toString(), false);
-            return new Response(errorPage, { status: 200, headers: {'Content-Type': 'text/html'}});
-        }
-    },
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __commonJS = (cb, mod) => function __require() {
+  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 
-/**
- * Handles VLESS over WebSocket requests by creating a WebSocket pair, accepting the WebSocket connection, and processing the VLESS header.
- * @param {import("@cloudflare/workers-types").Request} request The incoming request object.
- * @returns {Promise<Response>} A Promise that resolves to a WebSocket response object.
- */
-async function vlessOverWSHandler(request) {
-	const webSocketPair = new WebSocketPair();
-	const [client, webSocket] = Object.values(webSocketPair);
-	webSocket.accept();
-
-	let address = '';
-	let portWithRandomLog = '';
-	let currentDate = new Date();
-	const log = (/** @type {string} */ info, /** @type {string | undefined} */ event) => {
-		console.log(`[${currentDate} ${address}:${portWithRandomLog}] ${info}`, event || '');
-	};
-	const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
-
-	const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
-
-	/** @type {{ value: import("@cloudflare/workers-types").Socket | null}}*/
-	let remoteSocketWapper = {
-		value: null,
-	};
-	let udpStreamWrite = null;
-	let isDns = false;
-
-	// ws --> remote
-	readableWebSocketStream.pipeTo(new WritableStream({
-		async write(chunk, controller) {
-			if (isDns && udpStreamWrite) {
-				return udpStreamWrite(chunk);
-			}
-			if (remoteSocketWapper.value) {
-				const writer = remoteSocketWapper.value.writable.getWriter()
-				await writer.write(chunk);
-				writer.releaseLock();
-				return;
-			}
-
-			const {
-				hasError,
-				message,
-				portRemote = 443,
-				addressRemote = '',
-				rawDataIndex,
-				vlessVersion = new Uint8Array([0, 0]),
-				isUDP,
-			} = processVlessHeader(chunk, userID);
-			address = addressRemote;
-			portWithRandomLog = `${portRemote} ${isUDP ? 'udp' : 'tcp'} `;
-			if (hasError) {
-				// controller.error(message);
-				throw new Error(message); // cf seems has bug, controller.error will not end stream
-				// webSocket.close(1000, message);
-				return;
-			}
-
-			// If UDP and not DNS port, close it
-			if (isUDP && portRemote !== 53) {
-				throw new Error('UDP proxy only enabled for DNS which is port 53');
-				// cf seems has bug, controller.error will not end stream
-			}
-
-			if (isUDP && portRemote === 53) {
-				isDns = true;
-			}
-
-			// ["version", "附加信息长度 N"]
-			const vlessResponseHeader = new Uint8Array([vlessVersion[0], 0]);
-			const rawClientData = chunk.slice(rawDataIndex);
-
-			// TODO: support udp here when cf runtime has udp support
-			if (isDns) {
-				const { write } = await handleUDPOutBound(webSocket, vlessResponseHeader, log);
-				udpStreamWrite = write;
-				udpStreamWrite(rawClientData);
-				return;
-			}
-			handleTCPOutBound(request, remoteSocketWapper, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log);
-		},
-		close() {
-			log(`readableWebSocketStream is close`);
-		},
-		abort(reason) {
-			log(`readableWebSocketStream is abort`, JSON.stringify(reason));
-		},
-	})).catch((err) => {
-		log('readableWebSocketStream pipeTo error', err);
-	});
-
-	return new Response(null, {
-		status: 101,
-		webSocket: client,
-	});
-}
-
-/**
- * Handles outbound TCP connections.
- *
- * @param {any} remoteSocket 
- * @param {string} addressRemote The remote address to connect to.
- * @param {number} portRemote The remote port to connect to.
- * @param {Uint8Array} rawClientData The raw client data to write.
- * @param {import("@cloudflare/workers-types").WebSocket} webSocket The WebSocket to pass the remote socket to.
- * @param {Uint8Array} vlessResponseHeader The VLESS response header.
- * @param {function} log The logging function.
- * @returns {Promise<void>} The remote socket.
- */
-async function handleTCPOutBound(request, remoteSocket, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log,) {
-
-	/**
-	 * Connects to a given address and port and writes data to the socket.
-	 * @param {string} address The address to connect to.
-	 * @param {number} port The port to connect to.
-	 * @returns {Promise<import("@cloudflare/workers-types").Socket>} A Promise that resolves to the connected socket.
-	 */
-	async function connectAndWrite(address, port) {
-		/** @type {import("@cloudflare/workers-types").Socket} */
-		const tcpSocket = connect({
-			hostname: address,
-			port: port,
-		});
-		remoteSocket.value = tcpSocket;
-		log(`connected to ${address}:${port}`);
-		const writer = tcpSocket.writable.getWriter();
-		await writer.write(rawClientData); // first write, nomal is tls client hello
-		writer.releaseLock();
-		return tcpSocket;
-	}
-
-	/**
-	 * Retries connecting to the remote address and port if the Cloudflare socket has no incoming data.
-	 * @returns {Promise<void>} A Promise that resolves when the retry is complete.
-	 */
-	async function retry() {
-        const { pathname } = new URL(request.url);
-        let panelProxyIP = pathname.split('/')[2];
-        panelProxyIP = panelProxyIP ? atob(panelProxyIP) : undefined;
-		const tcpSocket = await connectAndWrite(panelProxyIP || proxyIP || addressRemote, portRemote);
-		tcpSocket.closed.catch(error => {
-			console.log('retry tcpSocket closed error', error);
-		}).finally(() => {
-			safeCloseWebSocket(webSocket);
-		})
-		remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
-	}
-
-	const tcpSocket = await connectAndWrite(addressRemote, portRemote);
-
-	// when remoteSocket is ready, pass to websocket
-	// remote--> ws
-	remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log);
-}
-
-/**
- * Creates a readable stream from a WebSocket server, allowing for data to be read from the WebSocket.
- * @param {import("@cloudflare/workers-types").WebSocket} webSocketServer The WebSocket server to create the readable stream from.
- * @param {string} earlyDataHeader The header containing early data for WebSocket 0-RTT.
- * @param {(info: string)=> void} log The logging function.
- * @returns {ReadableStream} A readable stream that can be used to read data from the WebSocket.
- */
-function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
-	let readableStreamCancel = false;
-	const stream = new ReadableStream({
-		start(controller) {
-			webSocketServer.addEventListener('message', (event) => {
-				const message = event.data;
-				controller.enqueue(message);
-			});
-
-			webSocketServer.addEventListener('close', () => {
-				safeCloseWebSocket(webSocketServer);
-				controller.close();
-			});
-
-			webSocketServer.addEventListener('error', (err) => {
-				log('webSocketServer has error');
-				controller.error(err);
-			});
-			const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
-			if (error) {
-				controller.error(error);
-			} else if (earlyData) {
-				controller.enqueue(earlyData);
-			}
-		},
-
-		pull(controller) {
-			// if ws can stop read if stream is full, we can implement backpressure
-			// https://streams.spec.whatwg.org/#example-rs-push-backpressure
-		},
-
-		cancel(reason) {
-			log(`ReadableStream was canceled, due to ${reason}`)
-			readableStreamCancel = true;
-			safeCloseWebSocket(webSocketServer);
-		}
-	});
-
-	return stream;
-}
-
-// https://xtls.github.io/development/protocols/vless.html
-// https://github.com/zizifn/excalidraw-backup/blob/main/v2ray-protocol.excalidraw
-
-/**
- * Processes the VLESS header buffer and returns an object with the relevant information.
- * @param {ArrayBuffer} vlessBuffer The VLESS header buffer to process.
- * @param {string} userID The user ID to validate against the UUID in the VLESS header.
- * @returns {{
- *  hasError: boolean,
- *  message?: string,
- *  addressRemote?: string,
- *  addressType?: number,
- *  portRemote?: number,
- *  rawDataIndex?: number,
- *  vlessVersion?: Uint8Array,
- *  isUDP?: boolean
- * }} An object with the relevant information extracted from the VLESS header buffer.
- */
-function processVlessHeader(vlessBuffer, userID) {
-	if (vlessBuffer.byteLength < 24) {
-		return {
-			hasError: true,
-			message: 'invalid data',
-		};
-	}
-
-	const version = new Uint8Array(vlessBuffer.slice(0, 1));
-	let isValidUser = false;
-	let isUDP = false;
-	const slicedBuffer = new Uint8Array(vlessBuffer.slice(1, 17));
-	const slicedBufferString = stringify(slicedBuffer);
-	// check if userID is valid uuid or uuids split by , and contains userID in it otherwise return error message to console
-	const uuids = userID.includes(',') ? userID.split(",") : [userID];
-	// uuid_validator(hostName, slicedBufferString);
-
-
-	// isValidUser = uuids.some(userUuid => slicedBufferString === userUuid.trim());
-	isValidUser = uuids.some(userUuid => slicedBufferString === userUuid.trim()) || uuids.length === 1 && slicedBufferString === uuids[0].trim();
-
-	console.log(`userID: ${slicedBufferString}`);
-
-	if (!isValidUser) {
-		return {
-			hasError: true,
-			message: 'invalid user',
-		};
-	}
-
-	const optLength = new Uint8Array(vlessBuffer.slice(17, 18))[0];
-	//skip opt for now
-
-	const command = new Uint8Array(
-		vlessBuffer.slice(18 + optLength, 18 + optLength + 1)
-	)[0];
-
-	// 0x01 TCP
-	// 0x02 UDP
-	// 0x03 MUX
-	if (command === 1) {
-		isUDP = false;
-	} else if (command === 2) {
-		isUDP = true;
-	} else {
-		return {
-			hasError: true,
-			message: `command ${command} is not support, command 01-tcp,02-udp,03-mux`,
-		};
-	}
-	const portIndex = 18 + optLength + 1;
-	const portBuffer = vlessBuffer.slice(portIndex, portIndex + 2);
-	// port is big-Endian in raw data etc 80 == 0x005d
-	const portRemote = new DataView(portBuffer).getUint16(0);
-
-	let addressIndex = portIndex + 2;
-	const addressBuffer = new Uint8Array(
-		vlessBuffer.slice(addressIndex, addressIndex + 1)
-	);
-
-	// 1--> ipv4  addressLength =4
-	// 2--> domain name addressLength=addressBuffer[1]
-	// 3--> ipv6  addressLength =16
-	const addressType = addressBuffer[0];
-	let addressLength = 0;
-	let addressValueIndex = addressIndex + 1;
-	let addressValue = '';
-	switch (addressType) {
-		case 1:
-			addressLength = 4;
-			addressValue = new Uint8Array(
-				vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength)
-			).join('.');
-			break;
-		case 2:
-			addressLength = new Uint8Array(
-				vlessBuffer.slice(addressValueIndex, addressValueIndex + 1)
-			)[0];
-			addressValueIndex += 1;
-			addressValue = new TextDecoder().decode(
-				vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength)
-			);
-			break;
-		case 3:
-			addressLength = 16;
-			const dataView = new DataView(
-				vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength)
-			);
-			// 2001:0db8:85a3:0000:0000:8a2e:0370:7334
-			const ipv6 = [];
-			for (let i = 0; i < 8; i++) {
-				ipv6.push(dataView.getUint16(i * 2).toString(16));
-			}
-			addressValue = ipv6.join(':');
-			// seems no need add [] for ipv6
-			break;
-		default:
-			return {
-				hasError: true,
-				message: `invild  addressType is ${addressType}`,
-			};
-	}
-	if (!addressValue) {
-		return {
-			hasError: true,
-			message: `addressValue is empty, addressType is ${addressType}`,
-		};
-	}
-
-	return {
-		hasError: false,
-		addressRemote: addressValue,
-		addressType,
-		portRemote,
-		rawDataIndex: addressValueIndex + addressLength,
-		vlessVersion: version,
-		isUDP,
-	};
-}
-
-
-/**
- * Converts a remote socket to a WebSocket connection.
- * @param {import("@cloudflare/workers-types").Socket} remoteSocket The remote socket to convert.
- * @param {import("@cloudflare/workers-types").WebSocket} webSocket The WebSocket to connect to.
- * @param {ArrayBuffer | null} vlessResponseHeader The VLESS response header.
- * @param {(() => Promise<void>) | null} retry The function to retry the connection if it fails.
- * @param {(info: string) => void} log The logging function.
- * @returns {Promise<void>} A Promise that resolves when the conversion is complete.
- */
-async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, retry, log) {
-	// remote--> ws
-	let remoteChunkCount = 0;
-	let chunks = [];
-	/** @type {ArrayBuffer | null} */
-	let vlessHeader = vlessResponseHeader;
-	let hasIncomingData = false; // check if remoteSocket has incoming data
-	await remoteSocket.readable
-		.pipeTo(
-			new WritableStream({
-				start() {
-				},
-				/**
-				 * 
-				 * @param {Uint8Array} chunk 
-				 * @param {*} controller 
-				 */
-				async write(chunk, controller) {
-					hasIncomingData = true;
-					remoteChunkCount++;
-					if (webSocket.readyState !== WS_READY_STATE_OPEN) {
-						controller.error(
-							'webSocket.readyState is not open, maybe close'
-						);
-					}
-					if (vlessHeader) {
-						webSocket.send(await new Blob([vlessHeader, chunk]).arrayBuffer());
-						vlessHeader = null;
-					} else {
-						// console.log(`remoteSocketToWS send chunk ${chunk.byteLength}`);
-						// seems no need rate limit this, CF seems fix this??..
-						// if (remoteChunkCount > 20000) {
-						// 	// cf one package is 4096 byte(4kb),  4096 * 20000 = 80M
-						// 	await delay(1);
-						// }
-						webSocket.send(chunk);
-					}
-				},
-				close() {
-					log(`remoteConnection!.readable is close with hasIncomingData is ${hasIncomingData}`);
-					// safeCloseWebSocket(webSocket); // no need server close websocket frist for some case will casue HTTP ERR_CONTENT_LENGTH_MISMATCH issue, client will send close event anyway.
-				},
-				abort(reason) {
-					console.error(`remoteConnection!.readable abort`, reason);
-				},
-			})
-		)
-		.catch((error) => {
-			console.error(
-				`remoteSocketToWS has exception `,
-				error.stack || error
-			);
-			safeCloseWebSocket(webSocket);
-		});
-
-	// seems is cf connect socket have error,
-	// 1. Socket.closed will have error
-	// 2. Socket.readable will be close without any data coming
-	if (hasIncomingData === false && retry) {
-		log(`retry`)
-		retry();
-	}
-}
-
-/**
- * Decodes a base64 string into an ArrayBuffer.
- * @param {string} base64Str The base64 string to decode.
- * @returns {{earlyData: ArrayBuffer|null, error: Error|null}} An object containing the decoded ArrayBuffer or null if there was an error, and any error that occurred during decoding or null if there was no error.
- */
-function base64ToArrayBuffer(base64Str) {
-	if (!base64Str) {
-		return { earlyData: null, error: null };
-	}
-	try {
-		// go use modified Base64 for URL rfc4648 which js atob not support
-		base64Str = base64Str.replace(/-/g, '+').replace(/_/g, '/');
-		const decode = atob(base64Str);
-		const arryBuffer = Uint8Array.from(decode, (c) => c.charCodeAt(0));
-		return { earlyData: arryBuffer.buffer, error: null };
-	} catch (error) {
-		return { earlyData: null, error };
-	}
-}
-
-/**
- * Checks if a given string is a valid UUID.
- * Note: This is not a real UUID validation.
- * @param {string} uuid The string to validate as a UUID.
- * @returns {boolean} True if the string is a valid UUID, false otherwise.
- */
-function isValidUUID(uuid) {
-	const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-	return uuidRegex.test(uuid);
-}
-
-const WS_READY_STATE_OPEN = 1;
-const WS_READY_STATE_CLOSING = 2;
-/**
- * Closes a WebSocket connection safely without throwing exceptions.
- * @param {import("@cloudflare/workers-types").WebSocket} socket The WebSocket connection to close.
- */
-function safeCloseWebSocket(socket) {
-	try {
-		if (socket.readyState === WS_READY_STATE_OPEN || socket.readyState === WS_READY_STATE_CLOSING) {
-			socket.close();
-		}
-	} catch (error) {
-		console.error('safeCloseWebSocket error', error);
-	}
-}
-
-const byteToHex = [];
-
-for (let i = 0; i < 256; ++i) {
-	byteToHex.push((i + 256).toString(16).slice(1));
-}
-
-function unsafeStringify(arr, offset = 0) {
-	return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
-}
-
-function stringify(arr, offset = 0) {
-	const uuid = unsafeStringify(arr, offset);
-	if (!isValidUUID(uuid)) {
-		throw TypeError("Stringified UUID is invalid");
-	}
-	return uuid;
-}
-
-
-/**
- * Handles outbound UDP traffic by transforming the data into DNS queries and sending them over a WebSocket connection.
- * @param {import("@cloudflare/workers-types").WebSocket} webSocket The WebSocket connection to send the DNS queries over.
- * @param {ArrayBuffer} vlessResponseHeader The VLESS response header.
- * @param {(string) => void} log The logging function.
- * @returns {{write: (chunk: Uint8Array) => void}} An object with a write method that accepts a Uint8Array chunk to write to the transform stream.
- */
-async function handleUDPOutBound(webSocket, vlessResponseHeader, log) {
-
-	let isVlessHeaderSent = false;
-	const transformStream = new TransformStream({
-		start(controller) {
-
-		},
-		transform(chunk, controller) {
-			// udp message 2 byte is the the length of udp data
-			// TODO: this should have bug, beacsue maybe udp chunk can be in two websocket message
-			for (let index = 0; index < chunk.byteLength;) {
-				const lengthBuffer = chunk.slice(index, index + 2);
-				const udpPakcetLength = new DataView(lengthBuffer).getUint16(0);
-				const udpData = new Uint8Array(
-					chunk.slice(index + 2, index + 2 + udpPakcetLength)
-				);
-				index = index + 2 + udpPakcetLength;
-				controller.enqueue(udpData);
-			}
-		},
-		flush(controller) {
-		}
-	});
-
-	// only handle dns udp for now
-	transformStream.readable.pipeTo(new WritableStream({
-		async write(chunk) {
-			const resp = await fetch(dohURL, // dns server url
-				{
-					method: 'POST',
-					headers: {
-						'content-type': 'application/dns-message',
-					},
-					body: chunk,
-				})
-			const dnsQueryResult = await resp.arrayBuffer();
-			const udpSize = dnsQueryResult.byteLength;
-			// console.log([...new Uint8Array(dnsQueryResult)].map((x) => x.toString(16)));
-			const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
-			if (webSocket.readyState === WS_READY_STATE_OPEN) {
-				log(`doh success and dns message length is ${udpSize}`);
-				if (isVlessHeaderSent) {
-					webSocket.send(await new Blob([udpSizeBuffer, dnsQueryResult]).arrayBuffer());
-				} else {
-					webSocket.send(await new Blob([vlessResponseHeader, udpSizeBuffer, dnsQueryResult]).arrayBuffer());
-					isVlessHeaderSent = true;
-				}
-			}
-		}
-	})).catch((error) => {
-		log('dns udp has error' + error)
-	});
-
-	const writer = transformStream.writable.getWriter();
-
-	return {
-		/**
-		 * 
-		 * @param {Uint8Array} chunk 
-		 */
-		write(chunk) {
-			writer.write(chunk);
-		}
-	};
-}
-
-/**
- *
- * @param {string} userID
- * @param {string | null} hostName
- * @returns {string}
- */
-
-const getNormalConfigs = async (env, hostName, client) => {
-    let proxySettings = {};
-    let vlessWsTls = '';
-
-    try {
-        proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while getting normal configs - ${error}`);
+// node_modules/base64-js/index.js
+var require_base64_js = __commonJS({
+  "node_modules/base64-js/index.js"(exports) {
+    "use strict";
+    exports.byteLength = byteLength;
+    exports.toByteArray = toByteArray;
+    exports.fromByteArray = fromByteArray;
+    var lookup = [];
+    var revLookup = [];
+    var Arr = typeof Uint8Array !== "undefined" ? Uint8Array : Array;
+    var code = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (i = 0, len = code.length; i < len; ++i) {
+      lookup[i] = code[i];
+      revLookup[code.charCodeAt(i)] = i;
     }
+    var i;
+    var len;
+    revLookup["-".charCodeAt(0)] = 62;
+    revLookup["_".charCodeAt(0)] = 63;
+    function getLens(b64) {
+      var len2 = b64.length;
+      if (len2 % 4 > 0) {
+        throw new Error("Invalid string. Length must be a multiple of 4");
+      }
+      var validLen = b64.indexOf("=");
+      if (validLen === -1)
+        validLen = len2;
+      var placeHoldersLen = validLen === len2 ? 0 : 4 - validLen % 4;
+      return [validLen, placeHoldersLen];
+    }
+    function byteLength(b64) {
+      var lens = getLens(b64);
+      var validLen = lens[0];
+      var placeHoldersLen = lens[1];
+      return (validLen + placeHoldersLen) * 3 / 4 - placeHoldersLen;
+    }
+    function _byteLength(b64, validLen, placeHoldersLen) {
+      return (validLen + placeHoldersLen) * 3 / 4 - placeHoldersLen;
+    }
+    function toByteArray(b64) {
+      var tmp;
+      var lens = getLens(b64);
+      var validLen = lens[0];
+      var placeHoldersLen = lens[1];
+      var arr = new Arr(_byteLength(b64, validLen, placeHoldersLen));
+      var curByte = 0;
+      var len2 = placeHoldersLen > 0 ? validLen - 4 : validLen;
+      var i2;
+      for (i2 = 0; i2 < len2; i2 += 4) {
+        tmp = revLookup[b64.charCodeAt(i2)] << 18 | revLookup[b64.charCodeAt(i2 + 1)] << 12 | revLookup[b64.charCodeAt(i2 + 2)] << 6 | revLookup[b64.charCodeAt(i2 + 3)];
+        arr[curByte++] = tmp >> 16 & 255;
+        arr[curByte++] = tmp >> 8 & 255;
+        arr[curByte++] = tmp & 255;
+      }
+      if (placeHoldersLen === 2) {
+        tmp = revLookup[b64.charCodeAt(i2)] << 2 | revLookup[b64.charCodeAt(i2 + 1)] >> 4;
+        arr[curByte++] = tmp & 255;
+      }
+      if (placeHoldersLen === 1) {
+        tmp = revLookup[b64.charCodeAt(i2)] << 10 | revLookup[b64.charCodeAt(i2 + 1)] << 4 | revLookup[b64.charCodeAt(i2 + 2)] >> 2;
+        arr[curByte++] = tmp >> 8 & 255;
+        arr[curByte++] = tmp & 255;
+      }
+      return arr;
+    }
+    function tripletToBase64(num) {
+      return lookup[num >> 18 & 63] + lookup[num >> 12 & 63] + lookup[num >> 6 & 63] + lookup[num & 63];
+    }
+    function encodeChunk(uint8, start, end) {
+      var tmp;
+      var output = [];
+      for (var i2 = start; i2 < end; i2 += 3) {
+        tmp = (uint8[i2] << 16 & 16711680) + (uint8[i2 + 1] << 8 & 65280) + (uint8[i2 + 2] & 255);
+        output.push(tripletToBase64(tmp));
+      }
+      return output.join("");
+    }
+    function fromByteArray(uint8) {
+      var tmp;
+      var len2 = uint8.length;
+      var extraBytes = len2 % 3;
+      var parts = [];
+      var maxChunkLength = 16383;
+      for (var i2 = 0, len22 = len2 - extraBytes; i2 < len22; i2 += maxChunkLength) {
+        parts.push(encodeChunk(uint8, i2, i2 + maxChunkLength > len22 ? len22 : i2 + maxChunkLength));
+      }
+      if (extraBytes === 1) {
+        tmp = uint8[len2 - 1];
+        parts.push(
+          lookup[tmp >> 2] + lookup[tmp << 4 & 63] + "=="
+        );
+      } else if (extraBytes === 2) {
+        tmp = (uint8[len2 - 2] << 8) + uint8[len2 - 1];
+        parts.push(
+          lookup[tmp >> 10] + lookup[tmp >> 4 & 63] + lookup[tmp << 2 & 63] + "="
+        );
+      }
+      return parts.join("");
+    }
+  }
+});
 
-    const { cleanIPs, proxyIP, ports } = proxySettings;
-    const resolved = await resolveDNS(hostName);
-    const Addresses = [
-        hostName,
-        'www.speedtest.net',
-        ...resolved.ipv4,
-        ...resolved.ipv6.map((ip) => `[${ip}]`),
-        ...(cleanIPs ? cleanIPs.split(',') : [])
-    ];
+// node_modules/ieee754/index.js
+var require_ieee754 = __commonJS({
+  "node_modules/ieee754/index.js"(exports) {
+    exports.read = function(buffer, offset, isLE, mLen, nBytes) {
+      var e, m;
+      var eLen = nBytes * 8 - mLen - 1;
+      var eMax = (1 << eLen) - 1;
+      var eBias = eMax >> 1;
+      var nBits = -7;
+      var i = isLE ? nBytes - 1 : 0;
+      var d = isLE ? -1 : 1;
+      var s = buffer[offset + i];
+      i += d;
+      e = s & (1 << -nBits) - 1;
+      s >>= -nBits;
+      nBits += eLen;
+      for (; nBits > 0; e = e * 256 + buffer[offset + i], i += d, nBits -= 8) {
+      }
+      m = e & (1 << -nBits) - 1;
+      e >>= -nBits;
+      nBits += mLen;
+      for (; nBits > 0; m = m * 256 + buffer[offset + i], i += d, nBits -= 8) {
+      }
+      if (e === 0) {
+        e = 1 - eBias;
+      } else if (e === eMax) {
+        return m ? NaN : (s ? -1 : 1) * Infinity;
+      } else {
+        m = m + Math.pow(2, mLen);
+        e = e - eBias;
+      }
+      return (s ? -1 : 1) * m * Math.pow(2, e - mLen);
+    };
+    exports.write = function(buffer, value, offset, isLE, mLen, nBytes) {
+      var e, m, c;
+      var eLen = nBytes * 8 - mLen - 1;
+      var eMax = (1 << eLen) - 1;
+      var eBias = eMax >> 1;
+      var rt = mLen === 23 ? Math.pow(2, -24) - Math.pow(2, -77) : 0;
+      var i = isLE ? 0 : nBytes - 1;
+      var d = isLE ? 1 : -1;
+      var s = value < 0 || value === 0 && 1 / value < 0 ? 1 : 0;
+      value = Math.abs(value);
+      if (isNaN(value) || value === Infinity) {
+        m = isNaN(value) ? 1 : 0;
+        e = eMax;
+      } else {
+        e = Math.floor(Math.log(value) / Math.LN2);
+        if (value * (c = Math.pow(2, -e)) < 1) {
+          e--;
+          c *= 2;
+        }
+        if (e + eBias >= 1) {
+          value += rt / c;
+        } else {
+          value += rt * Math.pow(2, 1 - eBias);
+        }
+        if (value * c >= 2) {
+          e++;
+          c /= 2;
+        }
+        if (e + eBias >= eMax) {
+          m = 0;
+          e = eMax;
+        } else if (e + eBias >= 1) {
+          m = (value * c - 1) * Math.pow(2, mLen);
+          e = e + eBias;
+        } else {
+          m = value * Math.pow(2, eBias - 1) * Math.pow(2, mLen);
+          e = 0;
+        }
+      }
+      for (; mLen >= 8; buffer[offset + i] = m & 255, i += d, m /= 256, mLen -= 8) {
+      }
+      e = e << mLen | m;
+      eLen += mLen;
+      for (; eLen > 0; buffer[offset + i] = e & 255, i += d, e /= 256, eLen -= 8) {
+      }
+      buffer[offset + i - d] |= s * 128;
+    };
+  }
+});
 
-    ports.forEach(port => {
-        Addresses.forEach((addr, index) => {
-
-            vlessWsTls += 'vless' + `://${userID}@${addr}:${port}?encryption=none&type=ws&host=${
-                randomUpperCase(hostName)}${
-                defaultHttpsPorts.includes(port) 
-                    ? `&security=tls&sni=${
-                        randomUpperCase(hostName)
-                    }&fp=randomized&alpn=${
-                        client === 'singbox' ? 'http/1.1' : 'h2,http/1.1'
-                    }`
-                    : ''}&path=${`/${getRandomPath(16)}${proxyIP ? `/${encodeURIComponent(btoa(proxyIP))}` : ''}`}${
-                        client === 'singbox' 
-                            ? '&eh=Sec-WebSocket-Protocol&ed=2560' 
-                            : encodeURIComponent('?ed=2560')
-                    }#${encodeURIComponent(generateRemark(index, port))}\n`;
-        });
+// node_modules/buffer/index.js
+var require_buffer = __commonJS({
+  "node_modules/buffer/index.js"(exports) {
+    "use strict";
+    var base64 = require_base64_js();
+    var ieee754 = require_ieee754();
+    var customInspectSymbol = typeof Symbol === "function" && typeof Symbol["for"] === "function" ? Symbol["for"]("nodejs.util.inspect.custom") : null;
+    exports.Buffer = Buffer3;
+    exports.SlowBuffer = SlowBuffer;
+    exports.INSPECT_MAX_BYTES = 50;
+    var K_MAX_LENGTH = 2147483647;
+    exports.kMaxLength = K_MAX_LENGTH;
+    Buffer3.TYPED_ARRAY_SUPPORT = typedArraySupport();
+    if (!Buffer3.TYPED_ARRAY_SUPPORT && typeof console !== "undefined" && typeof console.error === "function") {
+      console.error(
+        "This browser lacks typed array (Uint8Array) support which is required by `buffer` v5.x. Use `buffer` v4.x if you require old browser support."
+      );
+    }
+    function typedArraySupport() {
+      try {
+        const arr = new Uint8Array(1);
+        const proto = { foo: function() {
+          return 42;
+        } };
+        Object.setPrototypeOf(proto, Uint8Array.prototype);
+        Object.setPrototypeOf(arr, proto);
+        return arr.foo() === 42;
+      } catch (e) {
+        return false;
+      }
+    }
+    Object.defineProperty(Buffer3.prototype, "parent", {
+      enumerable: true,
+      get: function() {
+        if (!Buffer3.isBuffer(this))
+          return void 0;
+        return this.buffer;
+      }
     });
-
-    return btoa(vlessWsTls);
-}
-
-const generateRemark = (index, port) => {
-    let remark = '';
-    switch (index) {
-        case 0:
-        case 1:
-            remark = `💦 BPB - Domain_${index + 1} : ${port}`;
-            break;
-        case 2:
-        case 3:
-            remark = `💦 BPB - IPv4_${index - 1} : ${port}`;
-            break;
-        case 4:
-        case 5:
-            remark = `💦 BPB - IPv6_${index - 3} : ${port}`;
-            break;
+    Object.defineProperty(Buffer3.prototype, "offset", {
+      enumerable: true,
+      get: function() {
+        if (!Buffer3.isBuffer(this))
+          return void 0;
+        return this.byteOffset;
+      }
+    });
+    function createBuffer(length) {
+      if (length > K_MAX_LENGTH) {
+        throw new RangeError('The value "' + length + '" is invalid for option "size"');
+      }
+      const buf = new Uint8Array(length);
+      Object.setPrototypeOf(buf, Buffer3.prototype);
+      return buf;
+    }
+    function Buffer3(arg, encodingOrOffset, length) {
+      if (typeof arg === "number") {
+        if (typeof encodingOrOffset === "string") {
+          throw new TypeError(
+            'The "string" argument must be of type string. Received type number'
+          );
+        }
+        return allocUnsafe(arg);
+      }
+      return from(arg, encodingOrOffset, length);
+    }
+    Buffer3.poolSize = 8192;
+    function from(value, encodingOrOffset, length) {
+      if (typeof value === "string") {
+        return fromString(value, encodingOrOffset);
+      }
+      if (ArrayBuffer.isView(value)) {
+        return fromArrayView(value);
+      }
+      if (value == null) {
+        throw new TypeError(
+          "The first argument must be one of type string, Buffer, ArrayBuffer, Array, or Array-like Object. Received type " + typeof value
+        );
+      }
+      if (isInstance(value, ArrayBuffer) || value && isInstance(value.buffer, ArrayBuffer)) {
+        return fromArrayBuffer(value, encodingOrOffset, length);
+      }
+      if (typeof SharedArrayBuffer !== "undefined" && (isInstance(value, SharedArrayBuffer) || value && isInstance(value.buffer, SharedArrayBuffer))) {
+        return fromArrayBuffer(value, encodingOrOffset, length);
+      }
+      if (typeof value === "number") {
+        throw new TypeError(
+          'The "value" argument must not be of type number. Received type number'
+        );
+      }
+      const valueOf = value.valueOf && value.valueOf();
+      if (valueOf != null && valueOf !== value) {
+        return Buffer3.from(valueOf, encodingOrOffset, length);
+      }
+      const b = fromObject(value);
+      if (b)
+        return b;
+      if (typeof Symbol !== "undefined" && Symbol.toPrimitive != null && typeof value[Symbol.toPrimitive] === "function") {
+        return Buffer3.from(value[Symbol.toPrimitive]("string"), encodingOrOffset, length);
+      }
+      throw new TypeError(
+        "The first argument must be one of type string, Buffer, ArrayBuffer, Array, or Array-like Object. Received type " + typeof value
+      );
+    }
+    Buffer3.from = function(value, encodingOrOffset, length) {
+      return from(value, encodingOrOffset, length);
+    };
+    Object.setPrototypeOf(Buffer3.prototype, Uint8Array.prototype);
+    Object.setPrototypeOf(Buffer3, Uint8Array);
+    function assertSize(size) {
+      if (typeof size !== "number") {
+        throw new TypeError('"size" argument must be of type number');
+      } else if (size < 0) {
+        throw new RangeError('The value "' + size + '" is invalid for option "size"');
+      }
+    }
+    function alloc(size, fill, encoding) {
+      assertSize(size);
+      if (size <= 0) {
+        return createBuffer(size);
+      }
+      if (fill !== void 0) {
+        return typeof encoding === "string" ? createBuffer(size).fill(fill, encoding) : createBuffer(size).fill(fill);
+      }
+      return createBuffer(size);
+    }
+    Buffer3.alloc = function(size, fill, encoding) {
+      return alloc(size, fill, encoding);
+    };
+    function allocUnsafe(size) {
+      assertSize(size);
+      return createBuffer(size < 0 ? 0 : checked(size) | 0);
+    }
+    Buffer3.allocUnsafe = function(size) {
+      return allocUnsafe(size);
+    };
+    Buffer3.allocUnsafeSlow = function(size) {
+      return allocUnsafe(size);
+    };
+    function fromString(string, encoding) {
+      if (typeof encoding !== "string" || encoding === "") {
+        encoding = "utf8";
+      }
+      if (!Buffer3.isEncoding(encoding)) {
+        throw new TypeError("Unknown encoding: " + encoding);
+      }
+      const length = byteLength(string, encoding) | 0;
+      let buf = createBuffer(length);
+      const actual = buf.write(string, encoding);
+      if (actual !== length) {
+        buf = buf.slice(0, actual);
+      }
+      return buf;
+    }
+    function fromArrayLike(array) {
+      const length = array.length < 0 ? 0 : checked(array.length) | 0;
+      const buf = createBuffer(length);
+      for (let i = 0; i < length; i += 1) {
+        buf[i] = array[i] & 255;
+      }
+      return buf;
+    }
+    function fromArrayView(arrayView) {
+      if (isInstance(arrayView, Uint8Array)) {
+        const copy = new Uint8Array(arrayView);
+        return fromArrayBuffer(copy.buffer, copy.byteOffset, copy.byteLength);
+      }
+      return fromArrayLike(arrayView);
+    }
+    function fromArrayBuffer(array, byteOffset, length) {
+      if (byteOffset < 0 || array.byteLength < byteOffset) {
+        throw new RangeError('"offset" is outside of buffer bounds');
+      }
+      if (array.byteLength < byteOffset + (length || 0)) {
+        throw new RangeError('"length" is outside of buffer bounds');
+      }
+      let buf;
+      if (byteOffset === void 0 && length === void 0) {
+        buf = new Uint8Array(array);
+      } else if (length === void 0) {
+        buf = new Uint8Array(array, byteOffset);
+      } else {
+        buf = new Uint8Array(array, byteOffset, length);
+      }
+      Object.setPrototypeOf(buf, Buffer3.prototype);
+      return buf;
+    }
+    function fromObject(obj) {
+      if (Buffer3.isBuffer(obj)) {
+        const len = checked(obj.length) | 0;
+        const buf = createBuffer(len);
+        if (buf.length === 0) {
+          return buf;
+        }
+        obj.copy(buf, 0, 0, len);
+        return buf;
+      }
+      if (obj.length !== void 0) {
+        if (typeof obj.length !== "number" || numberIsNaN(obj.length)) {
+          return createBuffer(0);
+        }
+        return fromArrayLike(obj);
+      }
+      if (obj.type === "Buffer" && Array.isArray(obj.data)) {
+        return fromArrayLike(obj.data);
+      }
+    }
+    function checked(length) {
+      if (length >= K_MAX_LENGTH) {
+        throw new RangeError("Attempt to allocate Buffer larger than maximum size: 0x" + K_MAX_LENGTH.toString(16) + " bytes");
+      }
+      return length | 0;
+    }
+    function SlowBuffer(length) {
+      if (+length != length) {
+        length = 0;
+      }
+      return Buffer3.alloc(+length);
+    }
+    Buffer3.isBuffer = function isBuffer(b) {
+      return b != null && b._isBuffer === true && b !== Buffer3.prototype;
+    };
+    Buffer3.compare = function compare(a, b) {
+      if (isInstance(a, Uint8Array))
+        a = Buffer3.from(a, a.offset, a.byteLength);
+      if (isInstance(b, Uint8Array))
+        b = Buffer3.from(b, b.offset, b.byteLength);
+      if (!Buffer3.isBuffer(a) || !Buffer3.isBuffer(b)) {
+        throw new TypeError(
+          'The "buf1", "buf2" arguments must be one of type Buffer or Uint8Array'
+        );
+      }
+      if (a === b)
+        return 0;
+      let x = a.length;
+      let y = b.length;
+      for (let i = 0, len = Math.min(x, y); i < len; ++i) {
+        if (a[i] !== b[i]) {
+          x = a[i];
+          y = b[i];
+          break;
+        }
+      }
+      if (x < y)
+        return -1;
+      if (y < x)
+        return 1;
+      return 0;
+    };
+    Buffer3.isEncoding = function isEncoding(encoding) {
+      switch (String(encoding).toLowerCase()) {
+        case "hex":
+        case "utf8":
+        case "utf-8":
+        case "ascii":
+        case "latin1":
+        case "binary":
+        case "base64":
+        case "ucs2":
+        case "ucs-2":
+        case "utf16le":
+        case "utf-16le":
+          return true;
         default:
-            remark = `💦 BPB - Clean IP_${index - 5} : ${port}`;
-            break;
-    }
-
-    return remark;
-}
-
-const extractVlessParams = async (vlessConfig) => {
-    const url = new URL(vlessConfig.replace('vless', 'http'));
-    const params = new URLSearchParams(url.search);
-    let configParams = {
-        uuid : url.username,
-        hostName : url.hostname,
-        port : url.port
+          return false;
+      }
     };
-
-    params.forEach( (value, key) => {
-        configParams[key] = value;
-    })
-
-    return JSON.stringify(configParams);
-}
-
-const buildProxyOutbound = async (proxyParams) => {
-    const { hostName, port, uuid, flow, security, type, sni, fp, alpn, pbk, sid, spx, headerType, host, path, authority, serviceName, mode } = proxyParams;
-    let proxyOutbound = structuredClone(xrayOutboundTemp);   
-    proxyOutbound.settings.vnext[0].address = hostName;
-    proxyOutbound.settings.vnext[0].port = +port;
-    proxyOutbound.settings.vnext[0].users[0].id = uuid;
-    proxyOutbound.settings.vnext[0].users[0].flow = flow;
-    proxyOutbound.streamSettings.security = security;
-    proxyOutbound.streamSettings.network = type;
-    proxyOutbound.tag = "out";
-    proxyOutbound.streamSettings.sockopt.dialerProxy = "proxy";
-
-    switch (security) {
-
-        case 'tls':
-            proxyOutbound.streamSettings.tlsSettings.serverName = sni;
-            proxyOutbound.streamSettings.tlsSettings.fingerprint = fp;
-            proxyOutbound.streamSettings.tlsSettings.alpn = alpn ? alpn?.split(',') : [];
-            delete proxyOutbound.streamSettings.realitySettings;         
-            break;
-
-        case 'reality':
-            proxyOutbound.streamSettings.realitySettings.publicKey = pbk;
-            proxyOutbound.streamSettings.realitySettings.shortId = sid;
-            proxyOutbound.streamSettings.realitySettings.serverName = sni;
-            proxyOutbound.streamSettings.realitySettings.fingerprint = fp;
-            proxyOutbound.streamSettings.realitySettings.spiderX = spx;
-            delete proxyOutbound.mux;
-            delete proxyOutbound.streamSettings.tlsSettings;
-            break;
-
-        default:
-            delete proxyOutbound.streamSettings.tlsSettings;
-            delete proxyOutbound.streamSettings.realitySettings;         
-            break;
-    }
- 
-    switch (type) {
-
-        case 'tcp':
-            delete proxyOutbound.streamSettings.grpcSettings;
-            delete proxyOutbound.streamSettings.wsSettings;
-            
-            if (security === 'reality' && (!headerType || headerType === 'none')) {
-                delete proxyOutbound.streamSettings.tcpSettings;
-                break;
-            }
-
-            if (headerType === 'http') {
-                proxyOutbound.streamSettings.tcpSettings.header.request.headers.Host = host?.split(',');
-                proxyOutbound.streamSettings.tcpSettings.header.request.path = path?.split(',');
-            } 
-            
-            if (!headerType) {
-                proxyOutbound.streamSettings.tcpSettings.header.type = 'none';
-                delete proxyOutbound.streamSettings.tcpSettings.header.request;
-                delete proxyOutbound.streamSettings.tcpSettings.header.response;
-            }
-            
-            break;
-
-        case 'ws':
-            proxyOutbound.streamSettings.wsSettings.headers.Host = host;
-            proxyOutbound.streamSettings.wsSettings.path = path;
-            delete proxyOutbound.streamSettings.grpcSettings;
-            delete proxyOutbound.streamSettings.tcpSettings;
-            break;
-
-        case 'grpc':  
-            proxyOutbound.streamSettings.grpcSettings.authority = authority;
-            proxyOutbound.streamSettings.grpcSettings.serviceName = serviceName;
-            proxyOutbound.streamSettings.grpcSettings.multiMode = mode === 'multi';
-            delete proxyOutbound.mux;
-            delete proxyOutbound.streamSettings.tcpSettings;
-            delete proxyOutbound.streamSettings.wsSettings;
-            break;
-
-        default:
-            break;
-    }
-    
-    return proxyOutbound;
-}
-
-const buildWorkerLessConfig = async (env, client) => {
-    let proxySettings = {};
-
-    try {
-        proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while generating WorkerLess config - ${error}`);
-    }
-
-    const { remoteDNS, localDNS, lengthMin,  lengthMax,  intervalMin,  intervalMax, blockAds, bypassIran, blockPorn, bypassLAN } = proxySettings;  
-    let fakeOutbound = structuredClone(xrayOutboundTemp);
-    delete fakeOutbound.mux;
-    fakeOutbound.settings.vnext[0].address = 'google.com';
-    fakeOutbound.settings.vnext[0].users[0].id = userID;
-    delete fakeOutbound.streamSettings.sockopt;
-    fakeOutbound.streamSettings.tlsSettings.serverName = 'google.com';
-    fakeOutbound.streamSettings.wsSettings.headers.Host = 'google.com';
-    fakeOutbound.streamSettings.wsSettings.path = '/';
-    delete fakeOutbound.streamSettings.grpcSettings;
-    delete fakeOutbound.streamSettings.tcpSettings;
-    delete fakeOutbound.streamSettings.realitySettings;
-    fakeOutbound.tag = 'fake-outbound';
-
-    let fragConfig = structuredClone(xrayConfigTemp);
-    fragConfig.remarks  = '💦 BPB Frag - WorkerLess ⭐'
-    fragConfig.dns = await buildDNSObject(remoteDNS, localDNS, blockAds, bypassIran, blockPorn, true);
-    fragConfig.outbounds[0].settings.domainStrategy = 'UseIP';
-    fragConfig.outbounds[0].settings.fragment.length = `${lengthMin}-${lengthMax}`;
-    fragConfig.outbounds[0].settings.fragment.interval = `${intervalMin}-${intervalMax}`;
-    fragConfig.outbounds = [
-        {...fragConfig.outbounds[0]}, 
-        {...fakeOutbound}, 
-        {...fragConfig.outbounds[1]}, 
-        {...fragConfig.outbounds[2]}, 
-        {...fragConfig.outbounds[3]}
-    ];
-    fragConfig.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, false, false, true);
-    delete fragConfig.routing.balancers;
-    delete fragConfig.observatory;
-
-    if (client === 'nekoray') {
-        fragConfig.inbounds[0].port = 2080;
-        fragConfig.inbounds[1].port = 2081;
-    }
-
-    return fragConfig;
-}
-
-const getFragmentConfigs = async (env, hostName, client) => {
-    let Configs = [];
-    let outbounds = [];
-    let proxySettings = {};
-    let proxyOutbound;
-    let proxyIndex = 1;
-    const bestFragValues = ['10-20', '20-30', '30-40', '40-50', '50-60', '60-70', 
-                            '70-80', '80-90', '90-100', '10-30', '20-40', '30-50', 
-                            '40-60', '50-70', '60-80', '70-90', '80-100', '100-200']
-
-    try {
-        proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while getting fragment configs - ${error}`);
-    }
-
-    const {
-        remoteDNS, 
-        localDNS, 
-        lengthMin, 
-        lengthMax, 
-        intervalMin, 
-        intervalMax,
-        fragmentPackets,
-        blockAds,
-        bypassIran,
-        blockPorn,
-        bypassLAN, 
-        cleanIPs,
-        proxyIP,
-        outProxy,
-        outProxyParams,
-        ports
-    } = proxySettings;
-
-    const resolved = await resolveDNS(hostName);
-    const Addresses = [
-        hostName,
-        "www.speedtest.net",
-        ...resolved.ipv4,
-        ...resolved.ipv6.map((ip) => `[${ip}]`),
-        ...(cleanIPs ? cleanIPs.split(",") : [])
-    ];
-
-    if (outProxy) {
-        const proxyParams = JSON.parse(outProxyParams);
-        try {
-            proxyOutbound = await buildProxyOutbound(proxyParams);
-        } catch (error) {
-            console.log('An error occured while parsing chain proxy: ', error);
-            proxyOutbound = undefined;
-            await env.bpb.put("proxySettings", JSON.stringify({
-                ...proxySettings, 
-                outProxy: '',
-                outProxyParams: ''}));
+    Buffer3.concat = function concat(list, length) {
+      if (!Array.isArray(list)) {
+        throw new TypeError('"list" argument must be an Array of Buffers');
+      }
+      if (list.length === 0) {
+        return Buffer3.alloc(0);
+      }
+      let i;
+      if (length === void 0) {
+        length = 0;
+        for (i = 0; i < list.length; ++i) {
+          length += list[i].length;
         }
-    }
-
-    for (let portIndex in ports.filter(port => defaultHttpsPorts.includes(port))) {
-        let port = +ports[portIndex];
-        for (let index in Addresses) {            
-            let remark = generateRemark(+index, port);
-            let addr = Addresses[index];
-            let fragConfig = structuredClone(xrayConfigTemp);
-            let outbound = structuredClone(xrayOutboundTemp);
-            delete outbound.mux;
-            delete outbound.streamSettings.grpcSettings;
-            delete outbound.streamSettings.realitySettings;
-            delete outbound.streamSettings.tcpSettings;
-            outbound.settings.vnext[0].address = addr;
-            outbound.settings.vnext[0].port = port;
-            outbound.settings.vnext[0].users[0].id = userID;
-            outbound.streamSettings.tlsSettings.serverName = randomUpperCase(hostName);
-            outbound.streamSettings.wsSettings.headers.Host = randomUpperCase(hostName);
-            outbound.streamSettings.wsSettings.path = `/${getRandomPath(16)}${proxyIP ? `/${btoa(proxyIP)}` : ''}?ed=2560`;
-            fragConfig.remarks = remark;
-            fragConfig.dns = await buildDNSObject(remoteDNS, localDNS, blockAds, bypassIran, blockPorn);
-            fragConfig.outbounds[0].settings.fragment.length = `${lengthMin}-${lengthMax}`;
-            fragConfig.outbounds[0].settings.fragment.interval = `${intervalMin}-${intervalMax}`;
-            fragConfig.outbounds[0].settings.fragment.packets = fragmentPackets;
-            
-            if (proxyOutbound) {
-                fragConfig.outbounds = [{...proxyOutbound}, { ...outbound}, ...fragConfig.outbounds];
-                fragConfig.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, true, false);
-            } else {
-                fragConfig.outbounds = [{ ...outbound}, ...fragConfig.outbounds];
-                fragConfig.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, false, false);
-            }
-            
-            delete fragConfig.observatory;
-            delete fragConfig.routing.balancers;
-
-            if (client === 'nekoray') {
-                fragConfig.inbounds[0].port = 2080;
-                fragConfig.inbounds[1].port = 2081;
-                fragConfig.inbounds[2].port = 6450;
-            }
-                        
-            Configs.push({
-                address: remark,
-                config: fragConfig
-            }); 
-
-            outbound.tag = `prox_${proxyIndex}`;
-        
-            if (proxyOutbound) {
-                let proxyOut = structuredClone(proxyOutbound);
-                proxyOut.tag = `out_${proxyIndex}`;
-                proxyOut.streamSettings.sockopt.dialerProxy = `prox_${proxyIndex}`;
-                outbounds.push({...proxyOut}, {...outbound});
-            } else {
-                outbounds.push({...outbound});
-            }
-
-            proxyIndex++;
-        };
+      }
+      const buffer = Buffer3.allocUnsafe(length);
+      let pos = 0;
+      for (i = 0; i < list.length; ++i) {
+        let buf = list[i];
+        if (isInstance(buf, Uint8Array)) {
+          if (pos + buf.length > buffer.length) {
+            if (!Buffer3.isBuffer(buf))
+              buf = Buffer3.from(buf);
+            buf.copy(buffer, pos);
+          } else {
+            Uint8Array.prototype.set.call(
+              buffer,
+              buf,
+              pos
+            );
+          }
+        } else if (!Buffer3.isBuffer(buf)) {
+          throw new TypeError('"list" argument must be an Array of Buffers');
+        } else {
+          buf.copy(buffer, pos);
+        }
+        pos += buf.length;
+      }
+      return buffer;
     };
-
-    let bestPing = structuredClone(xrayConfigTemp);
-    bestPing.remarks = '💦 BPB Frag - Best Ping 💥';
-    bestPing.dns = await buildDNSObject(remoteDNS, localDNS, blockAds, bypassIran, blockPorn);
-    bestPing.outbounds[0].settings.fragment.length = `${lengthMin}-${lengthMax}`;
-    bestPing.outbounds[0].settings.fragment.interval = `${intervalMin}-${intervalMax}`;
-    bestPing.outbounds[0].settings.fragment.packets = fragmentPackets;
-    bestPing.outbounds = [...outbounds, ...bestPing.outbounds];
-    
-    if (proxyOutbound) {
-        bestPing.observatory.subjectSelector = ["out"];
-        bestPing.routing.balancers[0].selector = ["out"];
-        bestPing.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, true, true);
-    } else {
-        bestPing.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, false, true);
-    }
-
-    if (client === 'nekoray') {
-        bestPing.inbounds[0].port = 2080;
-        bestPing.inbounds[1].port = 2081;
-        bestPing.inbounds[2].port = 6450;
-    }
-
-    let bestFragment = structuredClone(xrayConfigTemp);
-    bestFragment.remarks = '💦 BPB Frag - Best Fragment 😎';
-    bestFragment.dns = await buildDNSObject(remoteDNS, localDNS, blockAds, bypassIran, blockPorn);
-    bestFragment.outbounds.splice(0,1);
-    bestFragValues.forEach( (fragLength, index) => {
-        bestFragment.outbounds.push({
-            tag: `frag_${index + 1}`,
-            protocol: "freedom",
-            settings: {
-                fragment: {
-                    packets: fragmentPackets,
-                    length: fragLength,
-                    interval: "1-1"
-                }
-            },
-            proxySettings: {
-                tag: proxyOutbound ? "out" : "proxy"
+    function byteLength(string, encoding) {
+      if (Buffer3.isBuffer(string)) {
+        return string.length;
+      }
+      if (ArrayBuffer.isView(string) || isInstance(string, ArrayBuffer)) {
+        return string.byteLength;
+      }
+      if (typeof string !== "string") {
+        throw new TypeError(
+          'The "string" argument must be one of type string, Buffer, or ArrayBuffer. Received type ' + typeof string
+        );
+      }
+      const len = string.length;
+      const mustMatch = arguments.length > 2 && arguments[2] === true;
+      if (!mustMatch && len === 0)
+        return 0;
+      let loweredCase = false;
+      for (; ; ) {
+        switch (encoding) {
+          case "ascii":
+          case "latin1":
+          case "binary":
+            return len;
+          case "utf8":
+          case "utf-8":
+            return utf8ToBytes(string).length;
+          case "ucs2":
+          case "ucs-2":
+          case "utf16le":
+          case "utf-16le":
+            return len * 2;
+          case "hex":
+            return len >>> 1;
+          case "base64":
+            return base64ToBytes(string).length;
+          default:
+            if (loweredCase) {
+              return mustMatch ? -1 : utf8ToBytes(string).length;
             }
-        });
-    });
-
-    let bestFragmentOutbounds = structuredClone([{...outbounds[0]}, {...outbounds[1]}]);  
-    bestFragmentOutbounds[0].settings.vnext[0].port = 443;
-    
-    if (proxyOutbound) {
-        bestFragmentOutbounds[0].streamSettings.sockopt.dialerProxy = 'proxy';
-        delete bestFragmentOutbounds[1].streamSettings.sockopt.dialerProxy;
-        bestFragmentOutbounds[0].tag = 'out';
-        bestFragmentOutbounds[1].tag = 'proxy';
-        bestFragment.outbounds = [bestFragmentOutbounds[0], bestFragmentOutbounds[1], ...bestFragment.outbounds];
-        bestFragment.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, true, true);
-    } else {
-        delete bestFragmentOutbounds[0].streamSettings.sockopt.dialerProxy;
-        bestFragmentOutbounds[0].tag = 'proxy';
-        bestFragment.outbounds = [bestFragmentOutbounds[0], ...bestFragment.outbounds];
-        bestFragment.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, false, true);
-    }
-
-    bestFragment.observatory.subjectSelector = ["frag"];
-    bestFragment.observatory.probeInterval = '30s';
-    bestFragment.routing.balancers[0].selector = ["frag"];
-
-    if (client === 'nekoray') {
-        bestFragment.inbounds[0].port = 2080;
-        bestFragment.inbounds[1].port = 2081;
-        bestFragment.inbounds[2].port = 6450;
-    }
-
-    const workerLessConfig = await buildWorkerLessConfig(env, client); 
-    Configs.push(
-        { address: 'Best-Ping', config: bestPing}, 
-        { address: 'Best-Fragment', config: bestFragment}, 
-        { address: 'WorkerLess', config: workerLessConfig}
-    );
-
-    return Configs;
-}
-
-const getSingboxConfig = async (env, hostName) => {
-    let proxySettings = {};
-    let outboundDomains = [];
-    const domainRegex = /^(?!:\/\/)([a-zA-Z0-9-]{1,63}\.)*[a-zA-Z0-9][a-zA-Z0-9-]{0,62}\.[a-zA-Z]{2,11}$/;
-    
-    try {
-        proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while getting sing-box configs - ${error}`);
-    }
-
-    const { remoteDNS,  localDNS, cleanIPs, proxyIP, ports } = proxySettings
-    let config = structuredClone(singboxConfigTemp);
-    config.dns.servers[0].address = remoteDNS;
-    config.dns.servers[1].address = localDNS;
-    const resolved = await resolveDNS(hostName);
-    const Addresses = [
-        hostName,
-        "www.speedtest.net",
-        ...resolved.ipv4,
-        ...resolved.ipv6.map((ip) => `[${ip}]`),
-        ...(cleanIPs ? cleanIPs.split(",") : [])
-    ];
-
-    ports.forEach(port => {
-        Addresses.forEach((addr, index) => {
-
-            let remark = generateRemark(index, port);
-            let outbound = structuredClone(singboxOutboundTemp);
-            outbound.server = addr;
-            outbound.tag = remark;
-            outbound.uuid = userID;
-            outbound.server_port = +port;
-            outbound.transport.headers.Host = randomUpperCase(hostName);
-            outbound.transport.path = `/${getRandomPath(16)}${proxyIP ? `/${btoa(proxyIP)}` : ''}`;
-            defaultHttpsPorts.includes(port)
-                ? outbound.tls.server_name = randomUpperCase(hostName)
-                : delete outbound.tls;
-            config.outbounds.push(outbound);
-            config.outbounds[0].outbounds.push(remark);
-            config.outbounds[1].outbounds.push(remark);
-            if (domainRegex.test(outbound.server)) outboundDomains.push(outbound.server);
-        });
-    });
-
-    config.dns.rules[0].domain = [...new Set(outboundDomains)];
-
-    return config;
-}
-
-const getWarpConfigs = async (env, client) => {
-    let proxySettings = {};
-    let xrayWarpConfigs = [];
-    let xrayWarpConfig = structuredClone(xrayConfigTemp);
-    let xrayWarpBestPing = structuredClone(xrayConfigTemp);
-    let xrayWoWConfigTemp = structuredClone(xrayConfigTemp);
-    let singboxWarpConfig = structuredClone(singboxConfigTemp);
-    let outboundDomains = [];
-    const domainRegex = /^(?!:\/\/)([a-zA-Z0-9-]{1,63}\.)*[a-zA-Z0-9][a-zA-Z0-9-]{0,62}\.[a-zA-Z]{2,11}$/;
-    
-    try {
-        proxySettings = await env.bpb.get("proxySettings", {type: 'json'});
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while getting fragment configs - ${error}`);
-    }
-    
-    const {remoteDNS, localDNS, blockAds, bypassIran, blockPorn, bypassLAN, wowEndpoint, warpEndpoints} = proxySettings;
-    const {xray: xrayWarpOutbounds, singbox: singboxWarpOutbounds} = await buildWarpOutbounds(env, client, remoteDNS, localDNS, blockAds, bypassIran, blockPorn, bypassLAN, warpEndpoints) 
-    const {xray: xrayWoWOutbounds, singbox: singboxWoWOutbounds} = await buildWoWOutbounds(env, client, remoteDNS, localDNS, blockAds, bypassIran, blockPorn, bypassLAN, wowEndpoint); 
-    
-    singboxWarpConfig.outbounds[0].outbounds = ['💦 Warp Best Ping 🚀'];
-    singboxWarpConfig.outbounds[1].tag = '💦 Warp Best Ping 🚀';
-    xrayWarpConfig.dns = await buildDNSObject(remoteDNS, localDNS, blockAds, bypassIran, blockPorn);
-    xrayWarpConfig.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, false, false);
-    xrayWarpConfig.outbounds.splice(0,1);
-    xrayWarpConfig.routing.rules[xrayWarpConfig.routing.rules.length - 1].outboundTag = 'warp';
-    delete xrayWarpConfig.observatory;
-    delete xrayWarpConfig.routing.balancers;
-    xrayWarpBestPing.remarks = '💦 BPB - Warp Best Ping 🚀'
-    xrayWarpBestPing.dns = await buildDNSObject(remoteDNS, localDNS, blockAds, bypassIran, blockPorn);
-    xrayWarpBestPing.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, false, true);
-    xrayWarpBestPing.outbounds.splice(0,1);
-    xrayWarpBestPing.routing.balancers[0].selector = ['warp'];
-    xrayWarpBestPing.observatory.subjectSelector = ['warp'];
-    xrayWoWConfigTemp.dns = await buildDNSObject(remoteDNS, localDNS, blockAds, bypassIran, blockPorn);
-    xrayWoWConfigTemp.routing.rules = buildRoutingRules(localDNS, blockAds, bypassIran, blockPorn, bypassLAN, false, false);
-    xrayWoWConfigTemp.outbounds.splice(0,1);
-    delete xrayWoWConfigTemp.observatory;
-    delete xrayWoWConfigTemp.routing.balancers;
-  
-    xrayWarpOutbounds.forEach((outbound, index) => {
-        xrayWarpConfigs.push({
-            ...xrayWarpConfig,
-            remarks: `💦 BPB - Warp ${index + 1} 🇮🇷`,
-            outbounds: [{...outbound, tag: 'warp'}, ...xrayWarpConfig.outbounds]
-        });
-    });
-    
-    xrayWoWOutbounds.forEach((outbound, index) => {
-        if (outbound.tag.includes('warp-out')) {
-            let xrayWoWConfig = structuredClone(xrayWoWConfigTemp);
-            xrayWoWConfig.remarks = `💦 BPB - WoW ${index/2 + 1} 🌍`;
-            xrayWoWConfig.outbounds = [{...xrayWoWOutbounds[index]}, {...xrayWoWOutbounds[index + 1]}, ...xrayWoWConfig.outbounds];
-            xrayWoWConfig.routing.rules[xrayWoWConfig.routing.rules.length - 1].outboundTag = outbound.tag;
-            xrayWarpConfigs.push(xrayWoWConfig);
+            encoding = ("" + encoding).toLowerCase();
+            loweredCase = true;
         }
-    });
-
-    xrayWarpBestPing.outbounds = [...xrayWarpOutbounds, ...xrayWarpBestPing.outbounds];
-    xrayWarpConfigs.push(xrayWarpBestPing);
-    
-    singboxWarpOutbounds.forEach((outbound, index) => {
-        singboxWarpConfig.outbounds.push(outbound);
-        singboxWarpConfig.outbounds[0].outbounds.push(outbound.tag);
-        singboxWarpConfig.outbounds[1].outbounds.push(outbound.tag);
-        if (domainRegex.test(outbound.server)) outboundDomains.push(outbound.server);
-    });
-
-    singboxWoWOutbounds.forEach((outbound, index) => {
-        if (outbound.tag.includes('WoW')) {
-            singboxWarpConfig.outbounds.push(singboxWoWOutbounds[index], singboxWoWOutbounds[index + 1]);
-            singboxWarpConfig.outbounds[0].outbounds.push(outbound.tag);
-            if (domainRegex.test(outbound.server)) outboundDomains.push(outbound.server);
-        }
-    });
-    
-    singboxWarpConfig.dns.rules[0].domain = [...new Set(outboundDomains)]; 
-
-    return client === 'singbox' || client === 'hiddify' 
-        ? singboxWarpConfig 
-        : xrayWarpConfigs;
-}
-
-const buildWarpOutbounds = async (env, client, remoteDNS, localDNS, blockAds, bypassIran, blockPorn, bypassLAN, warpEndpoints) => {
-    let warpConfigs = [];
-    let proxySettings = {};
-    let xrayOutboundTemp = structuredClone(xrayWgOutboundTemp);
-    let singboxOutbound = structuredClone(singboxWgOutboundTemp);
-    let xrayOutbounds = [];
-    let singboxOutbounds = [];
-    const ipv6Regex = /\[(.*?)\]/;
-    const portRegex = /[^:]*$/;
-    
-    try {
-        warpConfigs = await env.bpb.get('warpConfigs', {type: 'json'});
-        proxySettings = await env.bpb.get('proxySettings', {type: 'json'});
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while getting warp configs - ${error}`);
+      }
     }
-
-    xrayOutboundTemp.settings.address = [
-        `${warpConfigs[0].account.config.interface.addresses.v4}/32`,
-        `${warpConfigs[0].account.config.interface.addresses.v6}/128`
-    ];
-
-    xrayOutboundTemp.settings.peers[0].publicKey = warpConfigs[0].account.config.peers[0].public_key;
-    xrayOutboundTemp.settings.reserved = base64ToDecimal(warpConfigs[0].account.config.client_id);
-    xrayOutboundTemp.settings.secretKey = warpConfigs[0].privateKey;
-    
-    if (client === 'nikang') xrayOutboundTemp.settings = {
-        ...xrayOutboundTemp.settings,
-        wnoise: proxySettings.nikaNGNoiseMode,
-        wnoisecount: `${proxySettings.noiseCountMin}-${proxySettings.noiseCountMax}`,
-        wpayloadsize: `${proxySettings.noiseSizeMin}-${proxySettings.noiseSizeMax}`,
-        wnoisedelay: `${proxySettings.noiseDelayMin}-${proxySettings.noiseDelayMax}`
+    Buffer3.byteLength = byteLength;
+    function slowToString(encoding, start, end) {
+      let loweredCase = false;
+      if (start === void 0 || start < 0) {
+        start = 0;
+      }
+      if (start > this.length) {
+        return "";
+      }
+      if (end === void 0 || end > this.length) {
+        end = this.length;
+      }
+      if (end <= 0) {
+        return "";
+      }
+      end >>>= 0;
+      start >>>= 0;
+      if (end <= start) {
+        return "";
+      }
+      if (!encoding)
+        encoding = "utf8";
+      while (true) {
+        switch (encoding) {
+          case "hex":
+            return hexSlice(this, start, end);
+          case "utf8":
+          case "utf-8":
+            return utf8Slice(this, start, end);
+          case "ascii":
+            return asciiSlice(this, start, end);
+          case "latin1":
+          case "binary":
+            return latin1Slice(this, start, end);
+          case "base64":
+            return base64Slice(this, start, end);
+          case "ucs2":
+          case "ucs-2":
+          case "utf16le":
+          case "utf-16le":
+            return utf16leSlice(this, start, end);
+          default:
+            if (loweredCase)
+              throw new TypeError("Unknown encoding: " + encoding);
+            encoding = (encoding + "").toLowerCase();
+            loweredCase = true;
+        }
+      }
+    }
+    Buffer3.prototype._isBuffer = true;
+    function swap(b, n, m) {
+      const i = b[n];
+      b[n] = b[m];
+      b[m] = i;
+    }
+    Buffer3.prototype.swap16 = function swap16() {
+      const len = this.length;
+      if (len % 2 !== 0) {
+        throw new RangeError("Buffer size must be a multiple of 16-bits");
+      }
+      for (let i = 0; i < len; i += 2) {
+        swap(this, i, i + 1);
+      }
+      return this;
     };
-
-    delete xrayOutboundTemp.streamSettings;
-    
-    singboxOutbound.local_address = [
-        `${warpConfigs[0].account.config.interface.addresses.v4}/32`,
-        `${warpConfigs[0].account.config.interface.addresses.v6}/128`
-    ];
-
-    singboxOutbound.peer_public_key = warpConfigs[0].account.config.peers[0].public_key;
-    singboxOutbound.reserved = warpConfigs[0].account.config.client_id;
-    singboxOutbound.private_key = warpConfigs[0].privateKey;
-    
-    if (client === 'hiddify') singboxOutbound = {
-        ...singboxOutbound,
-        fake_packets_mode: proxySettings.hiddifyNoiseMode,
-        fake_packets: `${proxySettings.noiseCountMin}-${proxySettings.noiseCountMax}`,
-        fake_packets_size: `${proxySettings.noiseSizeMin}-${proxySettings.noiseSizeMax}`,
-        fake_packets_delay: `${proxySettings.noiseDelayMin}-${proxySettings.noiseDelayMax}`
+    Buffer3.prototype.swap32 = function swap32() {
+      const len = this.length;
+      if (len % 4 !== 0) {
+        throw new RangeError("Buffer size must be a multiple of 32-bits");
+      }
+      for (let i = 0; i < len; i += 4) {
+        swap(this, i, i + 3);
+        swap(this, i + 1, i + 2);
+      }
+      return this;
     };
-
-    delete singboxOutbound.detour;
-    
-    warpEndpoints.split(',').forEach( (endpoint, index) => {
-        let xrayOutbound = structuredClone(xrayOutboundTemp);
-        xrayOutbound.settings.peers[0].endpoint = endpoint;
-        xrayOutbound.tag = `warp-${index + 1}`;        
-        xrayOutbounds.push(xrayOutbound);
-        
-        singboxOutbounds.push({
-            ...singboxOutbound,
-            server: endpoint.includes('[') ? endpoint.match(ipv6Regex)[1] : endpoint.split(':')[0],
-            server_port: endpoint.includes('[') ? +endpoint.match(portRegex)[0] : +endpoint.split(':')[1],
-            tag: `💦 Warp ${index + 1} 🇮🇷`
-        });
-    })
-    
-    return {xray: xrayOutbounds, singbox: singboxOutbounds};
-}
-
-const buildWoWOutbounds = async (env, client, remoteDNS, localDNS, blockAds, bypassIran, blockPorn, bypassLAN, wowEndpoint) => {
-    let warpConfigs = [];
-    let proxySettings = {};
-    let xrayOutbounds = [];
-    let singboxOutbounds = [];
-    const ipv6Regex = /\[(.*?)\]/;
-    const portRegex = /[^:]*$/;
-    
-    try {
-        warpConfigs = await env.bpb.get('warpConfigs', {type: 'json'});
-        proxySettings = await env.bpb.get('proxySettings', {type: 'json'});
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while getting warp configs - ${error}`);
-    }
-
-    wowEndpoint.split(',').forEach( (endpoint, index) => {
-        
-        for (let i = 0; i < 2; i++) {
-            let xrayOutbound = structuredClone(xrayWgOutboundTemp);
-            let singboxOutbound = structuredClone(singboxWgOutboundTemp);
-            xrayOutbound.settings.address = [
-                `${warpConfigs[i].account.config.interface.addresses.v4}/32`,
-                `${warpConfigs[i].account.config.interface.addresses.v6}/128`
-            ];
-    
-            xrayOutbound.settings.peers[0].endpoint = endpoint;
-            xrayOutbound.settings.peers[0].publicKey = warpConfigs[i].account.config.peers[0].public_key;
-            xrayOutbound.settings.reserved = base64ToDecimal(warpConfigs[i].account.config.client_id);
-            xrayOutbound.settings.secretKey = warpConfigs[i].privateKey;
-            
-            if (client === 'nikang' && i === 1) xrayOutbound.settings = {
-                ...xrayOutbound.settings,
-                wnoise: proxySettings.nikaNGNoiseMode,
-                wnoisecount: `${proxySettings.noiseCountMin}-${proxySettings.noiseCountMax}`,
-                wpayloadsize: `${proxySettings.noiseSizeMin}-${proxySettings.noiseSizeMax}`,
-                wnoisedelay: `${proxySettings.noiseDelayMin}-${proxySettings.noiseDelayMax}`
-            };
-
-            xrayOutbound.tag = i === 1 ? `warp-ir_${index + 1}` : `warp-out_${index + 1}`;   
-            
-            if (i === 1) {
-                delete xrayOutbound.streamSettings;
-            } else {
-                xrayOutbound.streamSettings.sockopt.dialerProxy = `warp-ir_${index + 1}`;
-            }
-    
-            xrayOutbounds.push(xrayOutbound);
-    
-            singboxOutbound.local_address = [
-                `${warpConfigs[i].account.config.interface.addresses.v4}/32`,
-                `${warpConfigs[i].account.config.interface.addresses.v6}/128`
-            ];
-    
-            singboxOutbound.server = endpoint.includes('[') ? endpoint.match(ipv6Regex)[1] : endpoint.split(':')[0];
-            singboxOutbound.server_port = endpoint.includes('[') ? +endpoint.match(portRegex)[0] : +endpoint.split(':')[1];    
-            singboxOutbound.peer_public_key = warpConfigs[i].account.config.peers[0].public_key;
-            singboxOutbound.reserved = warpConfigs[i].account.config.client_id;
-            singboxOutbound.private_key = warpConfigs[i].privateKey;
-            
-            if (client === 'hiddify' && i === 1) singboxOutbound = {
-                ...singboxOutbound,
-                fake_packets_mode: proxySettings.hiddifyNoiseMode,
-                fake_packets: `${proxySettings.noiseCountMin}-${proxySettings.noiseCountMax}`,
-                fake_packets_size: `${proxySettings.noiseSizeMin}-${proxySettings.noiseSizeMax}`,
-                fake_packets_delay: `${proxySettings.noiseDelayMin}-${proxySettings.noiseDelayMax}`
-            };
-
-            singboxOutbound.tag = i === 1 ? `warp-ir_${index + 1}` : `💦 WoW ${index + 1} 🌍`;    
-            
-            if (i === 0) {
-                singboxOutbound.detour = `warp-ir_${index + 1}`;
-            } else {
-                delete singboxOutbound.detour;
-            }
-    
-            singboxOutbounds.push(singboxOutbound);
-        }
-
-    })
-
-    return {xray: xrayOutbounds, singbox: singboxOutbounds};
-}
-
-const fetchWgConfig = async (env, warpKeys) => {
-    let warpConfigs = [];
-    let proxySettings = {};
-    const apiBaseUrl = 'https://api.cloudflareclient.com/v0a4005/reg';
-
-    try {
-        proxySettings = await env.bpb.get('proxySettings', {type: 'json'});
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while getting warp configs - ${error}`);
-    }
-
-    const { warpPlusLicense } = proxySettings;
-
-    for(let i = 0; i < 2; i++) {
-        const accountResponse = await fetch(apiBaseUrl, {
-            method: 'POST',
-            headers: {
-                'User-Agent': 'insomnia/8.6.1',
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                key: warpKeys[i].publicKey,
-                install_id: "",
-                fcm_token: "",
-                tos: new Date().toISOString(),
-                type: "Android",
-                model: 'PC',
-                locale: 'en_US',
-                warp_enabled: true
-            })
-        });
-
-        const accountData = await accountResponse.json();
-        warpConfigs.push ({
-            privateKey: warpKeys[i].privateKey,
-            account: accountData
-        });
-
-        if (warpPlusLicense) {
-            const response = await fetch(`${apiBaseUrl}/${accountData.id}/account`, {
-                method: 'PUT',
-                headers: {
-                    'User-Agent': 'insomnia/8.6.1',
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${accountData.token}`
-                },
-                body: JSON.stringify({
-                    key: warpKeys[i].publicKey,
-                    install_id: "",
-                    fcm_token: "",
-                    tos: new Date().toISOString(),
-                    type: "Android",
-                    model: 'PC',
-                    locale: 'en_US',
-                    warp_enabled: true,
-                    license: warpPlusLicense
-                })
-            });
-
-            const responseData = await response.json();
-            if(response.status !== 200 && !responseData.success) return responseData.errors[0]?.message;
-        }
-    }
-    
-    await env.bpb.put('warpConfigs', JSON.stringify(warpConfigs));
-}
-
-const buildDNSObject = async (remoteDNS, localDNS, blockAds, bypassIran, blockPorn, isWorkerLess) => {
-    let dnsObject = {
-        hosts: {},
-        servers: [
-          isWorkerLess ? "https://cloudflare-dns.com/dns-query" : remoteDNS,
-          {
-            address: localDNS,
-            domains: ["geosite:category-ir", "domain:.ir"],
-            expectIPs: ["geoip:ir"],
-            port: 53,
-          },
-        ],
-        tag: "dns",
+    Buffer3.prototype.swap64 = function swap64() {
+      const len = this.length;
+      if (len % 8 !== 0) {
+        throw new RangeError("Buffer size must be a multiple of 64-bits");
+      }
+      for (let i = 0; i < len; i += 8) {
+        swap(this, i, i + 7);
+        swap(this, i + 1, i + 6);
+        swap(this, i + 2, i + 5);
+        swap(this, i + 3, i + 4);
+      }
+      return this;
     };
-
-    if (isWorkerLess) {
-        const resolvedDOH = await resolveDNS('cloudflare-dns.com');
-        const resolvedCloudflare = await resolveDNS('cloudflare.com');
-        const resolvedCLDomain = await resolveDNS('www.speedtest.net.cdn.cloudflare.net');
-        const resolvedCFNS_1 = await resolveDNS('ben.ns.cloudflare.com');
-        const resolvedCFNS_2 = await resolveDNS('lara.ns.cloudflare.com');
-        dnsObject.hosts['cloudflare-dns.com'] = [
-            ...resolvedDOH.ipv4, 
-            ...resolvedCloudflare.ipv4, 
-            ...resolvedCLDomain.ipv4,
-            ...resolvedCFNS_1.ipv4,
-            ...resolvedCFNS_2.ipv4
-        ];
-    }
-
-    if (blockAds) {
-        dnsObject.hosts["geosite:category-ads-all"] = ["127.0.0.1"];
-        dnsObject.hosts["geosite:category-ads-ir"] = ["127.0.0.1"];
-    }
-
-    if (blockPorn) {
-        dnsObject.hosts["geosite:category-porn"] = ["127.0.0.1"];
-    }
-
-    if (!bypassIran || localDNS === 'localhost' || isWorkerLess) {
-        dnsObject.servers.pop();
-    }
-
-    return dnsObject;
-}
-
-const buildRoutingRules = (localDNS, blockAds, bypassIran, blockPorn, bypassLAN, isChain, isBalancer, isWorkerLess) => {
-    let rules = [
-        {
-            inboundTag: ["dns-in"],
-            outboundTag: "dns-out",
-            type: "field"
-        },
-        {
-          ip: [localDNS],
-          outboundTag: "direct",
-          port: "53",
-          type: "field",
-        }
-    ];
-
-    if (localDNS === 'localhost' || isWorkerLess) {
-        rules.pop();
-    }
-
-    if (bypassIran || bypassLAN) {
-        let rule = {
-            ip: [],
-            outboundTag: "direct",
-            type: "field",
-        };
-        
-        if (bypassIran && !isWorkerLess) {
-            rules.push({
-                domain: ["geosite:category-ir", "domain:.ir"],
-                outboundTag: "direct",
-                type: "field",
-            });
-            rule.ip.push("geoip:ir");
-        }
-
-        bypassLAN && rule.ip.push("geoip:private");
-        rules.push(rule);
-    }
-
-    if (blockAds || blockPorn) {
-        let rule = {
-            domain: [],
-            outboundTag: "block",
-            type: "field",
-        };
-
-        blockAds && rule.domain.push("geosite:category-ads-all", "geosite:category-ads-ir");
-        blockPorn && rule.domain.push("geosite:category-porn");
-        rules.push(rule);
-    }
-   
-    if (isBalancer) {
-        rules.push({
-            balancerTag: "all",
-            type: "field",
-            network: "tcp,udp",
-        });
-    } else  {
-        rules.push({
-            outboundTag: isChain ? "out" : isWorkerLess ? "fragment" : "proxy",
-            type: "field",
-            network: "tcp,udp"
-        });
-    }
-
-    return rules;
-}
-
-const base64ToDecimal = (base64) => {
-    const binaryString = atob(base64);
-    const hexString = Array.from(binaryString).map(char => char.charCodeAt(0).toString(16).padStart(2, '0')).join('');
-    const decimalArray = hexString.match(/.{2}/g).map(hex => parseInt(hex, 16));
-    return decimalArray;
-}
-
-const updateDataset = async (env, Settings) => {
-    let currentProxySettings = {};
-
-    try {
-        currentProxySettings = await env.bpb.get("proxySettings", {type: 'json'});
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while getting current values - ${error}`);
-    }
-
-    const vlessConfig = Settings?.get('outProxy');
-
-    const proxySettings = {
-        remoteDNS: Settings ? Settings.get('remoteDNS') : currentProxySettings?.remoteDNS || 'https://94.140.14.14/dns-query',
-        localDNS: Settings ? Settings.get('localDNS') : currentProxySettings?.localDNS || '8.8.8.8',
-        lengthMin: Settings ? Settings.get('fragmentLengthMin') : currentProxySettings?.lengthMin || '100',
-        lengthMax: Settings ? Settings.get('fragmentLengthMax') : currentProxySettings?.lengthMax || '200',
-        intervalMin: Settings ? Settings.get('fragmentIntervalMin') : currentProxySettings?.intervalMin || '5',
-        intervalMax: Settings ? Settings.get('fragmentIntervalMax') : currentProxySettings?.intervalMax || '10',
-        fragmentPackets: Settings ? Settings.get('fragmentPackets') : currentProxySettings?.fragmentPackets || 'tlshello',
-        blockAds: Settings ? Settings.get('block-ads') : currentProxySettings?.blockAds || false,
-        bypassIran: Settings ? Settings.get('bypass-iran') : currentProxySettings?.bypassIran || false,
-        blockPorn: Settings ? Settings.get('block-porn') : currentProxySettings?.blockPorn || false,
-        bypassLAN: Settings ? Settings.get('bypass-lan') : currentProxySettings?.bypassLAN || false,
-        cleanIPs: Settings ? Settings.get('cleanIPs')?.replaceAll(' ', '') : currentProxySettings?.cleanIPs || '',
-        proxyIP: Settings ? Settings.get('proxyIP') : currentProxySettings?.proxyIP || '',
-        ports: Settings ? Settings.getAll('ports[]') : currentProxySettings?.ports || ['443'],
-        outProxy: Settings ? vlessConfig : currentProxySettings?.outProxy || '',
-        outProxyParams: vlessConfig ? await extractVlessParams(vlessConfig) : currentProxySettings?.outProxyParams || '',
-        wowEndpoint: Settings ? Settings.get('wowEndpoint')?.replaceAll(' ', '') : currentProxySettings?.wowEndpoint || 'engage.cloudflareclient.com:2408',
-        warpEndpoints: Settings ? Settings.get('warpEndpoints')?.replaceAll(' ', '') : currentProxySettings?.warpEndpoints || 'engage.cloudflareclient.com:2408',
-        hiddifyNoiseMode: Settings ? Settings.get('hiddifyNoiseMode') : currentProxySettings?.hiddifyNoiseMode || 'm4',
-        nikaNGNoiseMode: Settings ? Settings.get('nikaNGNoiseMode') : currentProxySettings?.nikaNGNoiseMode || 'quic',
-        noiseCountMin: Settings ? Settings.get('noiseCountMin') : currentProxySettings?.noiseCountMin || '10',
-        noiseCountMax: Settings ? Settings.get('noiseCountMax') : currentProxySettings?.noiseCountMax || '15',
-        noiseSizeMin: Settings ? Settings.get('noiseSizeMin') : currentProxySettings?.noiseSizeMin || '5',
-        noiseSizeMax: Settings ? Settings.get('noiseSizeMax') : currentProxySettings?.noiseSizeMax || '10',
-        noiseDelayMin: Settings ? Settings.get('noiseDelayMin') : currentProxySettings?.noiseDelayMin || '1',
-        noiseDelayMax: Settings ? Settings.get('noiseDelayMax') : currentProxySettings?.noiseDelayMax || '1',
-        warpPlusLicense: Settings ? Settings.get('warpPlusLicense') : currentProxySettings?.warpPlusLicense || '',
-        panelVersion: panelVersion
+    Buffer3.prototype.toString = function toString() {
+      const length = this.length;
+      if (length === 0)
+        return "";
+      if (arguments.length === 0)
+        return utf8Slice(this, 0, length);
+      return slowToString.apply(this, arguments);
     };
-
-    try {    
-        await env.bpb.put("proxySettings", JSON.stringify(proxySettings));          
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while updating KV - ${error}`);
-    }
-}
-
-const randomUpperCase = (str) => {
-    let result = '';
-    for (let i = 0; i < str.length; i++) {
-        result += Math.random() < 0.5 ? str[i].toUpperCase() : str[i];
-    }
-    return result;
-}
-
-const getRandomPath = (length) => {
-    let result = '';
-    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    const charactersLength = characters.length;
-    for (let i = 0; i < length; i++) {
-        result += characters.charAt(Math.floor(Math.random() * charactersLength));
-    }
-    return result;
-}
-
-const resolveDNS = async (domain) => {
-    const dohURLv4 = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(domain)}&type=A`;
-    const dohURLv6 = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(domain)}&type=AAAA`;
-
-    try {
-        const [ipv4Response, ipv6Response] = await Promise.all([
-            fetch(dohURLv4, { headers: { accept: 'application/dns-json' } }),
-            fetch(dohURLv6, { headers: { accept: 'application/dns-json' } }),
-        ]);
-
-        const ipv4Addresses = await ipv4Response.json();
-        const ipv6Addresses = await ipv6Response.json();
-
-        const ipv4 = ipv4Addresses.Answer
-            ? ipv4Addresses.Answer.map((record) => record.data)
-            : [];
-        const ipv6 = ipv6Addresses.Answer
-            ? ipv6Addresses.Answer.map((record) => record.data)
-            : [];
-
-        return { ipv4, ipv6 };
-    } catch (error) {
-        console.error('Error resolving DNS:', error);
-        throw new Error(`An error occurred while resolving DNS - ${error}`);
-    }
-}
-
-const generateJWTToken = (password, secretKey) => {
-    const header = {
-        alg: 'HS256',
-        typ: 'JWT'
-    };
-
-    const payload = {
-        exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60),
-        data: { password }
-    };
-    const encodedHeader = btoa(JSON.stringify(header));
-    const encodedPayload = btoa(JSON.stringify(payload));
-    const signature = btoa(crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${encodedHeader}.${encodedPayload}.${secretKey}`)));
-
-    return `Bearer ${encodedHeader}.${encodedPayload}.${signature}`;
-}
-
-const generateSecretKey = () => {
-    const bytes = new Uint8Array(32);
-    crypto.getRandomValues(bytes);
-    return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
-}
-  
-const Authenticate = async (request, env) => {
-    
-    try {
-        const secretKey = await env.bpb.get('secretKey');
-        const cookie = request.headers.get('Cookie');
-        const cookieMatch = cookie ? cookie.match(/(^|;\s*)jwtToken=([^;]*)/) : null;
-        const token = cookieMatch ? cookieMatch.pop() : null;
-
-        if (!token) {
-            console.log('token');
-            return false;
-        }
-
-        const tokenWithoutBearer = token.startsWith('Bearer ') ? token.slice(7) : token;
-        const [encodedHeader, encodedPayload, signature] = tokenWithoutBearer.split('.');
-        const payload = JSON.parse(atob(encodedPayload));
-
-        const expectedSignature = btoa(crypto.subtle.digest(
-            'SHA-256',
-            new TextEncoder().encode(`${encodedHeader}.${encodedPayload}.${secretKey}`)
-        ));
-
-        if (signature !== expectedSignature) return false;
-
-        const now = Math.floor(Date.now() / 1000);
-        if (payload.exp < now) return false;
-
+    Buffer3.prototype.toLocaleString = Buffer3.prototype.toString;
+    Buffer3.prototype.equals = function equals(b) {
+      if (!Buffer3.isBuffer(b))
+        throw new TypeError("Argument must be a Buffer");
+      if (this === b)
         return true;
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while authentication - ${error}`);
+      return Buffer3.compare(this, b) === 0;
+    };
+    Buffer3.prototype.inspect = function inspect() {
+      let str = "";
+      const max = exports.INSPECT_MAX_BYTES;
+      str = this.toString("hex", 0, max).replace(/(.{2})/g, "$1 ").trim();
+      if (this.length > max)
+        str += " ... ";
+      return "<Buffer " + str + ">";
+    };
+    if (customInspectSymbol) {
+      Buffer3.prototype[customInspectSymbol] = Buffer3.prototype.inspect;
     }
-}
-
-const renderHomePage = async (env, hostName, fragConfigs) => {
-    let proxySettings = {};
-    let warpConfigs = [];
-    let password = '';
-    
-    try {
-        proxySettings = await env.bpb.get('proxySettings', {type: 'json'});
-        warpConfigs = await env.bpb.get('warpConfigs', {type: 'json'});
-        password = await env.bpb.get('pwd');
-    } catch (error) {
-        console.log(error);
-        throw new Error(`An error occurred while rendering home page - ${error}`);
+    Buffer3.prototype.compare = function compare(target, start, end, thisStart, thisEnd) {
+      if (isInstance(target, Uint8Array)) {
+        target = Buffer3.from(target, target.offset, target.byteLength);
+      }
+      if (!Buffer3.isBuffer(target)) {
+        throw new TypeError(
+          'The "target" argument must be one of type Buffer or Uint8Array. Received type ' + typeof target
+        );
+      }
+      if (start === void 0) {
+        start = 0;
+      }
+      if (end === void 0) {
+        end = target ? target.length : 0;
+      }
+      if (thisStart === void 0) {
+        thisStart = 0;
+      }
+      if (thisEnd === void 0) {
+        thisEnd = this.length;
+      }
+      if (start < 0 || end > target.length || thisStart < 0 || thisEnd > this.length) {
+        throw new RangeError("out of range index");
+      }
+      if (thisStart >= thisEnd && start >= end) {
+        return 0;
+      }
+      if (thisStart >= thisEnd) {
+        return -1;
+      }
+      if (start >= end) {
+        return 1;
+      }
+      start >>>= 0;
+      end >>>= 0;
+      thisStart >>>= 0;
+      thisEnd >>>= 0;
+      if (this === target)
+        return 0;
+      let x = thisEnd - thisStart;
+      let y = end - start;
+      const len = Math.min(x, y);
+      const thisCopy = this.slice(thisStart, thisEnd);
+      const targetCopy = target.slice(start, end);
+      for (let i = 0; i < len; ++i) {
+        if (thisCopy[i] !== targetCopy[i]) {
+          x = thisCopy[i];
+          y = targetCopy[i];
+          break;
+        }
+      }
+      if (x < y)
+        return -1;
+      if (y < x)
+        return 1;
+      return 0;
+    };
+    function bidirectionalIndexOf(buffer, val, byteOffset, encoding, dir) {
+      if (buffer.length === 0)
+        return -1;
+      if (typeof byteOffset === "string") {
+        encoding = byteOffset;
+        byteOffset = 0;
+      } else if (byteOffset > 2147483647) {
+        byteOffset = 2147483647;
+      } else if (byteOffset < -2147483648) {
+        byteOffset = -2147483648;
+      }
+      byteOffset = +byteOffset;
+      if (numberIsNaN(byteOffset)) {
+        byteOffset = dir ? 0 : buffer.length - 1;
+      }
+      if (byteOffset < 0)
+        byteOffset = buffer.length + byteOffset;
+      if (byteOffset >= buffer.length) {
+        if (dir)
+          return -1;
+        else
+          byteOffset = buffer.length - 1;
+      } else if (byteOffset < 0) {
+        if (dir)
+          byteOffset = 0;
+        else
+          return -1;
+      }
+      if (typeof val === "string") {
+        val = Buffer3.from(val, encoding);
+      }
+      if (Buffer3.isBuffer(val)) {
+        if (val.length === 0) {
+          return -1;
+        }
+        return arrayIndexOf(buffer, val, byteOffset, encoding, dir);
+      } else if (typeof val === "number") {
+        val = val & 255;
+        if (typeof Uint8Array.prototype.indexOf === "function") {
+          if (dir) {
+            return Uint8Array.prototype.indexOf.call(buffer, val, byteOffset);
+          } else {
+            return Uint8Array.prototype.lastIndexOf.call(buffer, val, byteOffset);
+          }
+        }
+        return arrayIndexOf(buffer, [val], byteOffset, encoding, dir);
+      }
+      throw new TypeError("val must be string, number or Buffer");
     }
-
-    const {
-        remoteDNS, 
-        localDNS, 
-        lengthMin, 
-        lengthMax, 
-        intervalMin, 
-        intervalMax,
-        fragmentPackets, 
-        blockAds, 
-        bypassIran,
-        blockPorn,
-        bypassLAN,
-        cleanIPs, 
-        proxyIP, 
-        outProxy,
-        ports,
-        wowEndpoint,
-        warpEndpoints,
-        hiddifyNoiseMode,
-        nikaNGNoiseMode,
-        noiseCountMin,
-        noiseCountMax,
-        noiseSizeMin,
-        noiseSizeMax,
-        noiseDelayMin,
-        noiseDelayMax,
-        warpPlusLicense
-    } = proxySettings;
-
-    const isWarpReady = warpConfigs ? true : false;
-    const isPassSet = password ? password.length >= 8 : false;
-    const isWarpPlus = warpPlusLicense ? true : false;
-    const genCustomConfRow = async (configs) => {
-        let tableBlock = "";
-        configs.forEach(config => {
-            tableBlock += `
-            <tr>
-                <td>
-                    ${config.address === 'Best-Ping' 
-                        ? `<div  style="justify-content: center;"><span><b>💦 Best-Ping 💥</b></span></div>` 
-                        : config.address === 'WorkerLess'
-                            ? `<div  style="justify-content: center;"><span><b>💦 WorkerLess ⭐</b></span></div>`
-                            : config.address === 'Best-Fragment'
-                                ? `<div  style="justify-content: center;"><span><b>💦 Best-Fragment 😎</b></span></div>`
-                                : config.address
-                    }
-                </td>
-                <td>
-                    <button onclick="copyToClipboard('${encodeURIComponent(JSON.stringify(config.config, null, 4))}', true)">
-                        Copy Config 
-                        <span class="material-symbols-outlined">copy_all</span>
-                    </button>
-                </td>
-            </tr>`;
-        });
-
-        return tableBlock;
+    function arrayIndexOf(arr, val, byteOffset, encoding, dir) {
+      let indexSize = 1;
+      let arrLength = arr.length;
+      let valLength = val.length;
+      if (encoding !== void 0) {
+        encoding = String(encoding).toLowerCase();
+        if (encoding === "ucs2" || encoding === "ucs-2" || encoding === "utf16le" || encoding === "utf-16le") {
+          if (arr.length < 2 || val.length < 2) {
+            return -1;
+          }
+          indexSize = 2;
+          arrLength /= 2;
+          valLength /= 2;
+          byteOffset /= 2;
+        }
+      }
+      function read(buf, i2) {
+        if (indexSize === 1) {
+          return buf[i2];
+        } else {
+          return buf.readUInt16BE(i2 * indexSize);
+        }
+      }
+      let i;
+      if (dir) {
+        let foundIndex = -1;
+        for (i = byteOffset; i < arrLength; i++) {
+          if (read(arr, i) === read(val, foundIndex === -1 ? 0 : i - foundIndex)) {
+            if (foundIndex === -1)
+              foundIndex = i;
+            if (i - foundIndex + 1 === valLength)
+              return foundIndex * indexSize;
+          } else {
+            if (foundIndex !== -1)
+              i -= i - foundIndex;
+            foundIndex = -1;
+          }
+        }
+      } else {
+        if (byteOffset + valLength > arrLength)
+          byteOffset = arrLength - valLength;
+        for (i = byteOffset; i >= 0; i--) {
+          let found = true;
+          for (let j = 0; j < valLength; j++) {
+            if (read(arr, i + j) !== read(val, j)) {
+              found = false;
+              break;
+            }
+          }
+          if (found)
+            return i;
+        }
+      }
+      return -1;
     }
-
-    const buildPortsBlock = async () => {
-        let httpPortsBlock = '';
-        let httpsPortsBlock = '';
-        [...defaultHttpPorts, ...defaultHttpsPorts].forEach(port => {
-            let id = `port-${port}`;
-            let portBlock = `
-                <div class="routing" style="grid-template-columns: 1fr 2fr; margin-right: 10px;">
-                    <input type="checkbox" id=${id} name=${port} onchange="handlePortChange(event)" value="true" ${ports.includes(port) ? 'checked' : ''}>
-                    <label style="margin-bottom: 3px;" for=${id}>${port}</label>
-                </div>`;
-            defaultHttpPorts.includes(port) ? httpPortsBlock += portBlock : httpsPortsBlock += portBlock;
-        });
-
-        return {httpPortsBlock, httpsPortsBlock};
+    Buffer3.prototype.includes = function includes(val, byteOffset, encoding) {
+      return this.indexOf(val, byteOffset, encoding) !== -1;
+    };
+    Buffer3.prototype.indexOf = function indexOf(val, byteOffset, encoding) {
+      return bidirectionalIndexOf(this, val, byteOffset, encoding, true);
+    };
+    Buffer3.prototype.lastIndexOf = function lastIndexOf(val, byteOffset, encoding) {
+      return bidirectionalIndexOf(this, val, byteOffset, encoding, false);
+    };
+    function hexWrite(buf, string, offset, length) {
+      offset = Number(offset) || 0;
+      const remaining = buf.length - offset;
+      if (!length) {
+        length = remaining;
+      } else {
+        length = Number(length);
+        if (length > remaining) {
+          length = remaining;
+        }
+      }
+      const strLen = string.length;
+      if (length > strLen / 2) {
+        length = strLen / 2;
+      }
+      let i;
+      for (i = 0; i < length; ++i) {
+        const parsed = parseInt(string.substr(i * 2, 2), 16);
+        if (numberIsNaN(parsed))
+          return i;
+        buf[offset + i] = parsed;
+      }
+      return i;
     }
-
-    const html = `
-    <!DOCTYPE html>
-    <html lang="en">
-
-	<head>
-		<meta charset="UTF-8">
-		<meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>BPB Panel ${panelVersion}</title>
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
-        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
-		<style>
-			body { font-family: system-ui; }
-            .material-symbols-outlined {
-                margin-left: 5px;
-                font-variation-settings:
-                'FILL' 0,
-                'wght' 400,
-                'GRAD' 0,
-                'opsz' 24
-            }
-            h1 { font-size: 2.5em; text-align: center; color: #09639f; text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.25); }
-			h2 { margin: 30px 0; text-align: center; color: #3b3b3b; }
-			hr { border: 1px solid #ddd; margin: 20px 0; }
-            .footer {
-                display: flex;
-                font-weight: 600;
-                margin: 10px auto 0 auto;
-                justify-content: center;
-                align-items: center;
-            }
-            .footer button {margin: 0 20px; background: #212121; max-width: fit-content;}
-            .footer button:hover, .footer button:focus { background: #3b3b3b;}
-            .form-control a, a.link { text-decoration: none; }
-			.form-control {
-				margin-bottom: 15px;
-				display: grid;
-				grid-template-columns: 1fr 1fr;
-				align-items: baseline;
-				justify-content: flex-end;
-				font-family: Arial, sans-serif;
-			}
-            .form-control button {
-                background-color: white;
-                font-size: 1.1rem;
-                font-weight: 600;
-                color: #09639f;
-                border-color: #09639f;
-                border: 2px solid;
-            }
-            #apply {display: block; margin-top: 30px;}
-            input.button {font-weight: 600; padding: 15px 0; font-size: 1.1rem;}
-			label {
-				display: block;
-				margin-bottom: 5px;
-				font-size: 110%;
-				font-weight: 600;
-				color: #333;
-			}
-			input[type="text"],
-			input[type="number"],
-			input[type="url"],
-			textarea,
-			select {
-				width: 100%;
-				text-align: center;
-				padding: 10px;
-				border: 1px solid #ddd;
-				border-radius: 5px;
-				font-size: 16px;
-				color: #333;
-				background-color: #fff;
-				box-sizing: border-box;
-				margin-bottom: 15px;
-				transition: border-color 0.3s ease;
-			}	
-			input[type="text"]:focus,
-			input[type="number"]:focus,
-			input[type="url"]:focus,
-			textarea:focus,
-			select:focus { border-color: #3498db; outline: none; }
-			.button,
-			table button {
-				display: flex;
-                align-items: center;
-                justify-content: center;
-                width: 100%;
-				white-space: nowrap;
-				padding: 10px 15px;
-				font-size: 16px;
-                font-weight: 600;
-				letter-spacing: 1px;
-				border: none;
-				border-radius: 5px;
-				color: #fff;
-				background-color: #09639f;
-				cursor: pointer;
-				outline: none;
-				box-shadow: 0 5px 10px rgba(0, 0, 0, 0.2);
-				transition: all 0.3s ease;
-			}
-            table button { margin: auto; width: auto; }
-            .button.disabled {
-                background-color: #ccc;
-                cursor: not-allowed;
-                box-shadow: none;
-                pointer-events: none;
-            }
-			.button:hover,
-			table button:hover,
-			table button:focus {
-				background-color: #2980b9;
-				box-shadow: 0 8px 15px rgba(0, 0, 0, 0.3);
-				transform: translateY(-2px);
-			}
-            button.button:hover { color: white; }
-			.button:active,
-			table button:active { transform: translateY(1px); box-shadow: 0 3px 7px rgba(0, 0, 0, 0.3); }
-			.form-container {
-				max-width: 90%;
-				margin: 0 auto;
-				padding: 20px;
-				background: #f9f9f9;
-				border: 1px solid #eaeaea;
-				border-radius: 10px;
-				box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-			}
-			.table-container { margin-top: 20px; overflow-x: auto; }
-			table { 
-                width: 100%; 
-                border-collapse: collapse; 
-                margin-bottom: 20px;
-                border-radius: 7px;
-                overflow: hidden;
-                box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-            }
-			th, td { padding: 8px 15px; border-bottom: 1px solid #ddd; }
-            td div { display: flex; align-items: center; }
-			th { background-color: #3498db; color: white; font-weight: bold; font-size: 1.1rem; width: 50%;}
-			tr:nth-child(odd) { background-color: #f2f2f2; }
-            #custom-configs-table td { text-align: center; text-wrap: nowrap; }
-			tr:hover { background-color: #f1f1f1; }
-            .modal {
-                display: none;
-                position: fixed;
-                z-index: 1;
-                left: 0;
-                top: 0;
-                width: 100%;
-                height: 100%;
-                overflow: auto;
-                background-color: rgba(0, 0, 0, 0.4);
-            }
-            .modal-content {
-                background-color: #f9f9f9;
-                margin: auto;
-                padding: 10px 20px 20px;
-                border: 1px solid #eaeaea;
-                border-radius: 10px;
-                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-                width: 80%;
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-            }
-            .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; }
-            .close:hover,
-            .close:focus { color: black; text-decoration: none; cursor: pointer; }
-            .form-control label {
-                display: block;
-                margin-bottom: 5px;
-                font-size: 110%;
-                font-weight: 600;
-                color: #333;
-            }
-            .form-control input[type="password"] {
-                width: 100%;
-                padding: 10px;
-                border: 1px solid #ddd;
-                border-radius: 5px;
-                font-size: 16px;
-                color: #333;
-                background-color: #fff;
-                box-sizing: border-box;
-                margin-bottom: 15px;
-                transition: border-color 0.3s ease;
-            }
-            .routing { 
-                display: grid;
-                grid-template-columns: 1fr 3fr 8fr 1fr;
-                justify-content: center;
-                margin-bottom: 15px;
-            }
-            .routing label {
-                text-align: left;
-                margin: 0;
-                font-weight: 400;
-                font-size: 100%;
-                text-wrap: nowrap;
-            }
-            .form-control input[type="password"]:focus { border-color: #3498db; outline: none; }
-            #passwordError { color: red; margin-bottom: 10px; }
-            .symbol { margin-right: 8px; }
-            .modalQR {
-                display: none;
-                position: fixed;
-                z-index: 1;
-                left: 0;
-                top: 0;
-                width: 100%;
-                height: 100%;
-                overflow: auto;
-                background-color: rgba(0, 0, 0, 0.4);
-            }
-            @media only screen and (min-width: 768px) {
-                .form-container { max-width: 70%; }
-                #apply { display: block; margin: 30px auto 0 auto; max-width: 50%; }
-                .modal-content { width: 30% }
-                .routing { grid-template-columns: 4fr 2fr 6fr 4fr; }
-            }
-		</style>
-	</head>
-	
-	<body>
-		<h1>BPB Panel <span style="font-size: smaller;">${panelVersion}</span> 💦</h1>
-		<div class="form-container">
-            <h2>FRAGMENT SETTINGS ⚙️</h2>
-			<form id="configForm">
-				<div class="form-control">
-					<label for="remoteDNS">🌏 Remote DNS</label>
-					<input type="url" id="remoteDNS" name="remoteDNS" value="${remoteDNS}" required>
-				</div>
-				<div class="form-control">
-					<label for="localDNS">🏚️ Local DNS</label>
-					<input type="text" id="localDNS" name="localDNS" value="${localDNS}"
-						pattern="^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|localhost$"
-						title="Please enter a valid DNS IP Address or localhost!"  required>
-				</div>	
-				<div class="form-control">
-					<label for="fragmentLengthMin">📐 Length</label>
-					<div style="display: grid; grid-template-columns: 1fr auto 1fr; align-items: baseline;">
-						<input type="number" id="fragmentLengthMin" name="fragmentLengthMin" value="${lengthMin}" min="10" required>
-						<span style="text-align: center; white-space: pre;"> - </span>
-						<input type="number" id="fragmentLengthMax" name="fragmentLengthMax" value="${lengthMax}" max="500" required>
-					</div>
-				</div>
-				<div class="form-control">
-					<label for="fragmentIntervalMin">🕞 Interval</label>
-					<div style="display: grid; grid-template-columns: 1fr auto 1fr; align-items: baseline;">
-						<input type="number" id="fragmentIntervalMin" name="fragmentIntervalMin"
-    						value="${intervalMin}" max="30" required>
-						<span style="text-align: center; white-space: pre;"> - </span>
-						<input type="number" id="fragmentIntervalMax" name="fragmentIntervalMax"
-    						value="${intervalMax}" max="30" required>
-					</div>
-				</div>
-                <div class="form-control">
-                    <label for="fragmentPackets">📦 Fragment Packets</label>
-                    <div class="input-with-select">
-                        <select id="fragmentPackets" name="fragmentPackets">
-                            <option value="tlshello" ${fragmentPackets === 'tlshello' ? 'selected' : ''}>tlshello</option>
-                            <option value="1-1" ${fragmentPackets === '1-1' ? 'selected' : ''}>1-1</option>
-                            <option value="1-2" ${fragmentPackets === '1-2' ? 'selected' : ''}>1-2</option>
-                            <option value="1-3" ${fragmentPackets === '1-3' ? 'selected' : ''}>1-3</option>
-                            <option value="1-5" ${fragmentPackets === '1-5' ? 'selected' : ''}>1-5</option>
-                        </select>
-                    </div>
-                </div>
-				<div class="form-control">
-					<label for="outProxy">✈️ Chain Proxy</label>
-					<input type="text" id="outProxy" name="outProxy" value="${outProxy}">
-				</div>
-                <h2>FRAG/WARP ROUTING ⚙️</h2>
-				<div class="form-control" style="margin-bottom: 20px;">			
-                    <div class="routing">
-                        <input type="checkbox" id="block-ads" name="block-ads" style="margin: 0; grid-column: 2;" value="true" ${blockAds ? 'checked' : ''}>
-                        <label for="block-ads">Block Ads.</label>
-                    </div>
-                    <div class="routing">
-						<input type="checkbox" id="bypass-iran" name="bypass-iran" style="margin: 0; grid-column: 2;" value="true" ${bypassIran ? 'checked' : ''}>
-                        <label for="bypass-iran">Bypass Iran</label>
-					</div>
-                    <div class="routing">
-						<input type="checkbox" id="block-porn" name="block-porn" style="margin: 0; grid-column: 2;" value="true" ${blockPorn ? 'checked' : ''}>
-                        <label for="block-porn">Block Porn</label>
-					</div>
-                    <div class="routing">
-						<input type="checkbox" id="bypass-lan" name="bypass-lan" style="margin: 0; grid-column: 2;" value="true" ${bypassLAN ? 'checked' : ''}>
-                        <label for="bypass-lan">Bypass LAN</label>
-					</div>
-				</div>
-                <h2>PROXY IP ⚙️</h2>
-				<div class="form-control">
-					<label for="proxyIP">📍 IP or Domain</label>
-					<input type="text" id="proxyIP" name="proxyIP" value="${proxyIP}">
-				</div>
-                <h2>CLEAN IP ⚙️</h2>
-				<div class="form-control">
-					<label for="cleanIPs">✨ Clean IPs</label>
-					<input type="text" id="cleanIPs" name="cleanIPs" value="${cleanIPs.replaceAll(",", " , ")}">
-				</div>
-                <div class="form-control">
-                    <label>🔎 Online Scanner</label>
-                    <a href="https://scanner.github1.cloud/" id="scanner" name="scanner" target="_blank">
-                        <button type="button" class="button">
-                            Scan now
-                            <span class="material-symbols-outlined" style="margin-left: 5px;">open_in_new</span>
-                        </button>
-                    </a>
-                </div>
-                <h2>PORTS ⚙️</h2>
-                <div class="table-container">
-                    <table id="frag-sub-table">
-                        <tr>
-                            <th style="text-wrap: nowrap; background-color: gray;">Config type</th>
-                            <th style="text-wrap: nowrap; background-color: gray;">Ports</th>
-                        </tr>
-                        <tr>
-                            <td style="text-align: center; font-size: larger;"><b>TLS</b></td>
-                            <td style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr;">${(await buildPortsBlock()).httpsPortsBlock}</td>    
-                        </tr>
-                        ${hostName.includes('pages.dev') ? '' : `<tr>
-                            <td style="text-align: center; font-size: larger;"><b>Non TLS</b></td>
-                            <td style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr;">${(await buildPortsBlock()).httpPortsBlock}</td>    
-                        </tr>`}        
-                    </table>
-                </div>
-                <h2>WARP SETTINGS ⚙️</h2>
-				<div class="form-control">
-                    <label for="wowEndpoint">✨ WoW Endpoints</label>
-                    <input type="text" id="wowEndpoint" name="wowEndpoint" value="${wowEndpoint.replaceAll(",", " , ")}" required>
-				</div>
-				<div class="form-control">
-                    <label for="warpEndpoints">✨ Warp Endpoints</label>
-                    <input type="text" id="warpEndpoints" name="warpEndpoints" value="${warpEndpoints.replaceAll(",", " , ")}" required>
-				</div>
-				<div class="form-control">
-                    <label for="warpPlusLicense">➕ Warp+ License</label>
-                    <input type="text" id="warpPlusLicense" name="warpPlusLicense" value="${warpPlusLicense}" 
-                        pattern="^[a-zA-Z0-9]{8}-[a-zA-Z0-9]{8}-[a-zA-Z0-9]{8}$" 
-                        title="Please enter a valid Warp Plus license in xxxxxxxx-xxxxxxxx-xxxxxxxx format">
-				</div>
-                <div class="form-control">
-                    <label>♻️ Warp Configs</label>
-                    <button id="refreshBtn" type="button" class="button" style="padding: 10px 0;" onclick="getWarpConfigs()">
-                        Update<span class="material-symbols-outlined">autorenew</span>
-                    </button>
-                </div>
-                <div class="form-control">
-                    <label>🔎 Endpoint Scanner</label>
-                    <button type="button" class="button" style="padding: 10px 0;" onclick="copyToClipboard('bash <(curl -fsSL https://raw.githubusercontent.com/Ptechgithub/warp/main/endip/install.sh)', false)">
-                        Copy Script<span class="material-symbols-outlined">terminal</span>
-                    </button>
-                </div>
-                <h2>WARP PRO SETTINGS ⚙️</h2>
-                <div class="form-control">
-					<label for="hiddifyNoiseMode">😵‍💫 Hiddify Mode</label>
-					<input type="text" id="hiddifyNoiseMode" name="hiddifyNoiseMode" 
-                        pattern="^(m[1-6]|h_[0-9A-Fa-f]{2}|g_([0-9A-Fa-f]{2}_){2}[0-9A-Fa-f]{2})$" 
-                        title="Enter 'm1-m6', 'h_HEX', 'g_HEX_HEX_HEX' which HEX can be between 00 to ff"
-                        value="${hiddifyNoiseMode}" required>
-				</div>
-                <div class="form-control">
-					<label for="nikaNGNoiseMode">😵‍💫 NikaNG Mode</label>
-					<input type="text" id="nikaNGNoiseMode" name="nikaNGNoiseMode" 
-                        pattern="^(none|quic|random|[0-9A-Fa-f]+)$" 
-                        title="Enter 'none', 'quic', 'random', or any HEX string like 'ee0000000108aaaa'"
-                        value="${nikaNGNoiseMode}" required>
-				</div>
-                <div class="form-control">
-					<label for="noiseCountMin">🎚️ Noise Count</label>
-					<div style="display: grid; grid-template-columns: 1fr auto 1fr; align-items: baseline;">
-						<input type="number" id="noiseCountMin" name="noiseCountMin"
-    						value="${noiseCountMin}" required>
-						<span style="text-align: center; white-space: pre;"> - </span>
-						<input type="number" id="noiseCountMax" name="noiseCountMax"
-    						value="${noiseCountMax}" required>
-					</div>
-				</div>
-                <div class="form-control">
-					<label for="noiseSizeMin">📏 Noise Size</label>
-					<div style="display: grid; grid-template-columns: 1fr auto 1fr; align-items: baseline;">
-						<input type="number" id="noiseSizeMin" name="noiseSizeMin"
-    						value="${noiseSizeMin}" required>
-						<span style="text-align: center; white-space: pre;"> - </span>
-						<input type="number" id="noiseSizeMax" name="noiseSizeMax"
-    						value="${noiseSizeMax}" required>
-					</div>
-				</div>
-                <div class="form-control">
-					<label for="noiseDelayMin">🕞 Noise Delay</label>
-					<div style="display: grid; grid-template-columns: 1fr auto 1fr; align-items: baseline;">
-						<input type="number" id="noiseDelayMin" name="noiseDelayMin"
-    						value="${noiseDelayMin}" required>
-						<span style="text-align: center; white-space: pre;"> - </span>
-						<input type="number" id="noiseDelayMax" name="noiseDelayMax"
-    						value="${noiseDelayMax}" required>
-					</div>
-				</div>
-				<div id="apply" class="form-control">
-					<div style="grid-column: 2; width: 100%;">
-						<input type="submit" id="applyButton" class="button disabled" value="APPLY SETTINGS 💥" form="configForm">
-					</div>
-				</div>
-			</form>
-            <hr>            
-			<h2>NORMAL CONFIGS SUB 🔗</h2>
-			<div class="table-container">
-				<table id="normal-configs-table">
-					<tr>
-						<th>Application</th>
-						<th>Subscription</th>
-					</tr>
-					<tr>
-                        <td>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>v2rayNG</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>NikaNG</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>MahsaNG</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>v2rayN</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>v2rayN-PRO</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Shadowrocket</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Streisand</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Hiddify</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Nekoray (Xray)</span>
-                            </div>
-                        </td>
-						<td>
-                            <button onclick="openQR('https://${hostName}/sub/${userID}#BPB-Normal', 'Normal Subscription')" style="margin-bottom: 8px;">
-                                QR Code&nbsp;<span class="material-symbols-outlined">qr_code</span>
-                            </button>
-                            <button onclick="copyToClipboard('https://${hostName}/sub/${userID}#BPB-Normal', false)">
-                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
-                            </button>
-                        </td>
-					</tr>
-					<tr>
-                        <td>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Nekobox</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Nekoray (Sing-Box)</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Karing</span>
-                            </div>
-                        </td>
-						<td>
-                            <button onclick="copyToClipboard('https://${hostName}/sub/${userID}?app=singbox#BPB-Normal', false)">
-                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
-                            </button>
-						</td>
-					</tr>
-                    <tr>
-                        <td>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Sing-box - <b>Best Ping</b></span>
-                            </div>
-                        </td>
-                        <td>
-                            <button onclick="openQR('sing-box://import-remote-profile?url=https://${hostName}/sub/${userID}?app=sfa#BPB-Normal', 'Normal Subscription')" style="margin-bottom: 8px;">
-                                QR Code&nbsp;<span class="material-symbols-outlined">qr_code</span>
-                            </button>
-                            <button onclick="copyToClipboard('https://${hostName}/sub/${userID}?app=sfa#BPB-Normal', false)">
-                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
-                            </button>
-                        </td>
-                    </tr>
-				</table>
-			</div>
-			<h2>FRAGMENT SUB ⛓️</h2>
-			<div class="table-container">
-                <table id="frag-sub-table">
-                    <tr>
-                        <th style="text-wrap: nowrap;">Application</th>
-                        <th style="text-wrap: nowrap;">Fragment Subscription</th>
-                    </tr>
-                    <tr>
-                        <td style="text-wrap: nowrap;">
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>v2rayNG</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>NikaNG</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>MahsaNG</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>v2rayN</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>v2rayN-PRO</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Streisand</span>
-                            </div>
-                        </td>
-                        <td>
-                            <button onclick="openQR('https://${hostName}/fragsub/${userID}#BPB Fragment', 'Fragment Subscription')" style="margin-bottom: 8px;">
-                                QR Code&nbsp;<span class="material-symbols-outlined">qr_code</span>
-                            </button>
-                            <button onclick="copyToClipboard('https://${hostName}/fragsub/${userID}#BPB Fragment', true)">
-                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
-                            </button>
-                        </td>
-                    </tr>
-                </table>
-            </div>
-            <h2>WARP SUB 🔗</h2>
-			<div class="table-container">
-				<table id="normal-configs-table">
-					<tr>
-						<th>Application</th>
-						<th>Subscription</th>
-					</tr>
-					<tr>
-                        <td>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>v2rayNG</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>MahsaNG</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>NikaNG</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>v2rayN</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Streisand</span>
-                            </div>
-                        </td>
-						<td>
-                            <button onclick="openQR('https://${hostName}/warpsub/${userID}#BPB-Warp', 'Warp Subscription')" style="margin-bottom: 8px;">
-                                QR Code&nbsp;<span class="material-symbols-outlined">qr_code</span>
-                            </button>
-                            <button onclick="copyToClipboard('https://${hostName}/warpsub/${userID}#BPB-Warp', false)">
-                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
-                            </button>
-                        </td>
-					</tr>
-					<tr>
-                        <td>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Hiddify</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Singbox</span>
-                            </div>
-                        </td>
-						<td>
-                            <button onclick="openQR('sing-box://import-remote-profile?url=https://${hostName}/warpsub/${userID}?app=singbox#BPB-Warp', 'Warp Subscription')" style="margin-bottom: 8px;">
-                                QR Code&nbsp;<span class="material-symbols-outlined">qr_code</span>
-                            </button>
-                            <button onclick="copyToClipboard('https://${hostName}/warpsub/${userID}?app=singbox#BPB-Warp', false)">
-                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
-                            </button>
-						</td>
-					</tr>
-				</table>
-			</div>
-            <h2>WARP PRO SUB 🔗</h2>
-			<div class="table-container">
-				<table id="warp-pro-configs-table">
-					<tr>
-						<th>Application</th>
-						<th>Subscription</th>
-					</tr>
-					<tr>
-                        <td>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>NikaNG</span>
-                            </div>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>v2rayN-PRO</span>
-                            </div>
-                        </td>
-						<td>
-                            <button onclick="openQR('https://${hostName}/warpsub/${userID}?app=nikang#BPB-Warp-Pro', 'Warp Pro Subscription')" style="margin-bottom: 8px;">
-                                QR Code&nbsp;<span class="material-symbols-outlined">qr_code</span>
-                            </button>
-                            <button onclick="copyToClipboard('https://${hostName}/warpsub/${userID}?app=nikang#BPB-Warp-Pro', false)">
-                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
-                            </button>
-                        </td>
-					</tr>
-					<tr>
-                        <td>
-                            <div>
-                                <span class="material-symbols-outlined symbol">verified</span>
-                                <span>Hiddify</span>
-                            </div>
-                        </td>
-						<td>
-                            <button onclick="openQR('sing-box://import-remote-profile?url=https://${hostName}/warpsub/${userID}?app=hiddify#BPB-Warp-Pro', 'Warp Pro Subscription')" style="margin-bottom: 8px;">
-                                QR Code&nbsp;<span class="material-symbols-outlined">qr_code</span>
-                            </button>
-                            <button onclick="copyToClipboard('https://${hostName}/warpsub/${userID}?app=hiddify#BPB-Warp-Pro', false)">
-                                Copy Sub<span class="material-symbols-outlined">format_list_bulleted</span>
-                            </button>
-						</td>
-					</tr>
-				</table>
-			</div>
-            <h2>FRAGMENT - NEKORAY ⛓️</h2>
-            <div class="table-container">
-				<table id="custom-configs-table">
-					<tr style="text-wrap: nowrap;">
-						<th>Config Address</th>
-						<th>Fragment Config</th>
-					</tr>					
-					${await genCustomConfRow(fragConfigs)}
-				</table>
-			</div>
-            <div id="myModal" class="modal">
-                <div class="modal-content">
-                    <span class="close">&times;</span>
-                    <form id="passwordChangeForm">
-                        <h2>Change Password</h2>
-                        <div class="form-control">
-                            <label for="newPassword">New Password</label>
-                            <input type="password" id="newPassword" name="newPassword" required>
-                            </div>
-                        <div class="form-control">
-                            <label for="confirmPassword">Confirm Password</label>
-                            <input type="password" id="confirmPassword" name="confirmPassword" required>
-                        </div>
-                        <div id="passwordError" style="color: red; margin-bottom: 10px;"></div>
-                        <button id="changePasswordBtn" type="submit" class="button">Change Password</button>
-                    </form>
-                </div>
-            </div>
-            <div id="myQRModal" class="modalQR">
-                <div class="modal-content" style="width: auto; text-align: center;">
-                    <div style="display: flex; flex-direction: column; align-items: center; margin-bottom: 10px;">
-                        <span id="closeQRModal" class="close" style="align-self: flex-end;">&times;</span>
-                        <span id="qrcodeTitle" style="align-self: center; font-weight: bold;"></span>
-                    </div>
-                    <div id="qrcode-container"></div>
-                </div>
-            </div>
-            <hr>
-            <div class="footer">
-                <i class="fa fa-github" style="font-size:36px; margin-right: 10px;"></i>
-                <a class="link" href="https://github.com/bia-pain-bache/BPB-Worker-Panel" target="_blank">Github</a>
-                <button id="openModalBtn" class="button">Change Password</button>
-                <button type="button" id="logout" style="background: none; margin: 0; border: none; cursor: pointer;">
-                    <i class="fa fa-power-off fa-2x" aria-hidden="true"></i>
-                </button>
-            </div>
-        </div>
-        
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/tweetnacl/1.0.3/nacl.min.js"></script>
-	<script>
-        const defaultHttpsPorts = ['443', '8443', '2053', '2083', '2087', '2096'];
-        let activePortsNo = ${ports.length};
-        let activeHttpsPortsNo = ${ports.filter(port => defaultHttpsPorts.includes(port)).length};
-
-		document.addEventListener('DOMContentLoaded', async () => {
-            const configForm = document.getElementById('configForm');            
-            const modal = document.getElementById('myModal');
-            const changePass = document.getElementById("openModalBtn");
-            const closeBtn = document.querySelector(".close");
-            const passwordChangeForm = document.getElementById('passwordChangeForm');            
-            const applyBtn = document.getElementById('applyButton');         
-            const initialFormData = new FormData(configForm);
-            const closeQR = document.getElementById("closeQRModal");
-            let modalQR = document.getElementById("myQRModal");
-            let qrcodeContainer = document.getElementById("qrcode-container");
-            let forcedPassChange = false;
-
-            ${isPassSet && !isWarpReady} && await getWarpConfigs();
-                  
-            const hasFormDataChanged = () => {
-                const currentFormData = new FormData(configForm);
-                const currentFormDataEntries = [...currentFormData.entries()];
-
-                const nonCheckboxFieldsChanged = currentFormDataEntries.some(
-                    ([key, value]) => !initialFormData.has(key) || initialFormData.get(key) !== value
-                );
-
-                const checkboxFieldsChanged = Array.from(configForm.elements)
-                    .filter((element) => element.type === 'checkbox')
-                    .some((checkbox) => {
-                    const initialValue = initialFormData.has(checkbox.name)
-                        ? initialFormData.get(checkbox.name)
-                        : false;
-                    const currentValue = currentFormDataEntries.find(([key]) => key === checkbox.name)?.[1] || false;
-                    return initialValue !== currentValue;
-                });
-
-                return nonCheckboxFieldsChanged || checkboxFieldsChanged;
-            };
-          
-            const enableApplyButton = () => {
-                const isChanged = hasFormDataChanged();
-                applyButton.disabled = !isChanged;
-                applyButton.classList.toggle('disabled', !isChanged);
-            };
-                      
-            passwordChangeForm.addEventListener('submit', event => resetPassword(event));
-            document.getElementById('logout').addEventListener('click', event => logout(event));
-			configForm.addEventListener('submit', (event) => applySettings(event, configForm));
-            configForm.addEventListener('input', enableApplyButton);
-            configForm.addEventListener('change', enableApplyButton);
-            changePass.addEventListener('click', () => {
-                forcedPassChange ? closeBtn.style.display = 'none' : closeBtn.style.display = '';
-                modal.style.display = "block";
-                document.body.style.overflow = "hidden";
-                forcedPassChange = false;
-            });        
-            closeBtn.addEventListener('click', () => {
-                modal.style.display = "none";
-                document.body.style.overflow = "";
-            });
-            closeQR.addEventListener('click', () => {
-                modalQR.style.display = "none";
-                qrcodeContainer.lastElementChild.remove();
-            });
-            window.onclick = (event) => {
-                if (event.target == modalQR) {
-                    modalQR.style.display = "none";
-                    qrcodeContainer.lastElementChild.remove();
-                }
-            }
-
-            if (${!isPassSet}) {
-                forcedPassChange = true;
-                changePass.click();
-            }
-		});
-
-        const base64Encode = (array) => {
-            return btoa(String.fromCharCode.apply(null, array));
-        }
-
-        const generateKeyPair = () => {
-            let privateKey = new Uint8Array(32);
-            window.crypto.getRandomValues(privateKey);
-            privateKey[0] &= 248;
-            privateKey[31] &= 127;
-            privateKey[31] |= 64;
-            let publicKey = nacl.scalarMult.base(privateKey);
-            const publicKeyBase64 = base64Encode(publicKey);
-            const privateKeyBase64 = base64Encode(privateKey);
-
-            return {publicKey: publicKeyBase64, privateKey: privateKeyBase64};
-        }
-
-        const getWarpConfigs = async () => {
-            const refreshBtn = document.getElementById('refreshBtn');
-            const warpKeys = [
-                generateKeyPair(),
-                generateKeyPair()
-            ];
-
-            try {
-                document.body.style.cursor = 'wait';
-                const refreshButtonVal = refreshBtn.innerHTML;
-                refreshBtn.innerHTML = '⌛ Loading...';
-
-                const response = await fetch('/warp-keys', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(warpKeys),
-                    credentials: 'include'
-                });
-
-                document.body.style.cursor = 'default';
-                refreshBtn.innerHTML = refreshButtonVal;
-                if (response.ok) {
-                    ${isWarpPlus} ? alert('Warp configs upgraded to PLUS successfully! 😎') : alert('Warp configs updated successfully! 😎');
-                } else {
-                    const errorMessage = await response.text();
-                    console.error(errorMessage, response.status);
-                    alert('⚠️ An error occured, Please try again!\\n⛔ ' + errorMessage);
-                }         
-            } catch (error) {
-                console.error('Error:', error);
-            } 
-        }
-
-        const handlePortChange = (event) => {
-            
-            if(event.target.checked) { 
-                activePortsNo++ 
-                defaultHttpsPorts.includes(event.target.name) && activeHttpsPortsNo++;
-            } else {
-                activePortsNo--;
-                defaultHttpsPorts.includes(event.target.name) && activeHttpsPortsNo--;
-            }
-
-            if (activePortsNo === 0) {
-                event.preventDefault();
-                event.target.checked = !event.target.checked;
-                alert("⛔ At least one port should be selected! 🫤");
-                activePortsNo = 1;
-                defaultHttpsPorts.includes(event.target.name) && activeHttpsPortsNo++;
-                return false;
-            }
-                
-            if (activeHttpsPortsNo === 0) {
-                event.preventDefault();
-                event.target.checked = !event.target.checked;
-                alert("⛔ At least one TLS(https) port should be selected! 🫤");
-                activeHttpsPortsNo = 1;
-                return false;
-            }
-        }
-
-        const openQR = (url, title) => {
-            let qrcodeContainer = document.getElementById("qrcode-container");
-            let qrcodeTitle = document.getElementById("qrcodeTitle");
-            const modalQR = document.getElementById("myQRModal");
-            qrcodeTitle.textContent = title;
-            modalQR.style.display = "block";
-            let qrcodeDiv = document.createElement("div");
-            qrcodeDiv.className = "qrcode";
-            new QRCode(qrcodeDiv, {
-                text: url,
-                width: 256,
-                height: 256,
-                colorDark: "#000000",
-                colorLight: "#ffffff",
-                correctLevel: QRCode.CorrectLevel.H
-            });
-            qrcodeContainer.appendChild(qrcodeDiv);
-        }
-
-		const copyToClipboard = (text, decode) => {
-            const textarea = document.createElement('textarea');
-            const value = decode ? decodeURIComponent(text) : text;
-			textarea.value = value;
-			document.body.appendChild(textarea);
-			textarea.select();
-			document.execCommand('copy');
-			document.body.removeChild(textarea);
-			alert('📋 Copied to clipboard:\\n\\n' +  value);
-		}
-
-        const applySettings = async (event, configForm) => {
-            event.preventDefault();
-            event.stopPropagation();
-            const applyButton = document.getElementById('applyButton');
-            const getValue = (id) => parseInt(document.getElementById(id).value, 10);              
-            const lengthMin = getValue('fragmentLengthMin');
-            const lengthMax = getValue('fragmentLengthMax');
-            const intervalMin = getValue('fragmentIntervalMin');
-            const intervalMax = getValue('fragmentIntervalMax');
-            const proxyIP = document.getElementById('proxyIP').value?.trim();
-            const cleanIP = document.getElementById('cleanIPs');
-            const wowEndpoint = document.getElementById('wowEndpoint').value?.replaceAll(' ', '').split(',');
-            const warpEndpoints = document.getElementById('warpEndpoints').value?.replaceAll(' ', '').split(',');
-            const cleanIPs = cleanIP.value?.split(',');
-            const chainProxy = document.getElementById('outProxy').value?.trim();                    
-            const formData = new FormData(configForm);
-            const isVless = /vless:\\/\\/[^\s@]+@[^\\s:]+:[^\\s]+/.test(chainProxy);
-            const hasSecurity = /security=/.test(chainProxy);
-            const validSecurityType = /security=(tls|none|reality)/.test(chainProxy);
-            const validTransmission = /type=(tcp|grpc|ws)/.test(chainProxy);
-            const validIPDomain = /^((?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\\.)+[a-zA-Z]{2,})|(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|\\[(?:[a-fA-F0-9]{1,4}:){7}[a-fA-F0-9]{1,4}\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,7}:\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,6}:[a-fA-F0-9]{1,4}\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,5}(?::[a-fA-F0-9]{1,4}){1,2}\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,4}(?::[a-fA-F0-9]{1,4}){1,3}\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,3}(?::[a-fA-F0-9]{1,4}){1,4}\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,2}(?::[a-fA-F0-9]{1,4}){1,5}\\]|\\[[a-fA-F0-9]{1,4}:(?::[a-fA-F0-9]{1,4}){1,6}\\]|\\[:(?::[a-fA-F0-9]{1,4}){1,7}\\]|\\[\\](?:::[a-fA-F0-9]{1,4}){1,7}\\])$/i;
-            const checkedPorts = Array.from(document.querySelectorAll('input[id^="port-"]:checked')).map(input => input.id.split('-')[1]);
-            const validEndpoint = /^(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\\.)+[a-zA-Z]{2,}|(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|\\[(?:[a-fA-F0-9]{1,4}:){7}[a-fA-F0-9]{1,4}\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,7}:\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,6}:[a-fA-F0-9]{1,4}\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,5}(?::[a-fA-F0-9]{1,4}){1,2}\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,4}(?::[a-fA-F0-9]{1,4}){1,3}\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,3}(?::[a-fA-F0-9]{1,4}){1,4}\\]|\\[(?:[a-fA-F0-9]{1,4}:){1,2}(?::[a-fA-F0-9]{1,4}){1,5}\\]|\\[[a-fA-F0-9]{1,4}:(?::[a-fA-F0-9]{1,4}){1,6}\\]|\\[:(?::[a-fA-F0-9]{1,4}){1,7}\\]|\\[::(?::[a-fA-F0-9]{1,4}){0,7}\\]):(?:[0-9]{1,5})$/;
-            checkedPorts.forEach(port => formData.append('ports[]', port));
-
-            const invalidIPs = [...cleanIPs, proxyIP]?.filter(value => {
-                if (value !== "") {
-                    const trimmedValue = value.trim();
-                    return !validIPDomain.test(trimmedValue);
-                }
-            });
-
-            const invalidEndpoints = [...wowEndpoint, ...warpEndpoints]?.filter(value => {
-                if (value !== "") {
-                    const trimmedValue = value.trim();
-                    return !validEndpoint.test(trimmedValue);
-                }
-            });
-    
-            if (invalidIPs.length) {
-                alert('⛔ Invalid IPs or Domains 🫤\\n\\n' + invalidIPs.map(ip => '⚠️ ' + ip).join('\\n'));
-                return false;
-            }
-            
-            if (invalidEndpoints.length) {
-                alert('⛔ Invalid endpoint 🫤\\n\\n' + invalidEndpoints.map(endpoint => '⚠️ ' + endpoint).join('\\n'));
-                return false;
-            }
-
-            if (lengthMin >= lengthMax || intervalMin > intervalMax) {
-                alert('⛔ Minimum should be smaller or equal to Maximum! 🫤');               
-                return false;
-            }
-
-            if (!(isVless && (hasSecurity && validSecurityType || !hasSecurity) && validTransmission) && chainProxy) {
-                alert('⛔ Invalid Config! 🫤 \\n - The chain proxy should be VLESS!\\n - Transmission should be GRPC,WS or TCP\\n - Security should be TLS,Reality or None');               
-                return false;
-            }
-
-            try {
-                document.body.style.cursor = 'wait';
-                const applyButtonVal = applyButton.value;
-                applyButton.value = '⌛ Loading...';
-
-                const response = await fetch('/panel', {
-                    method: 'POST',
-                    body: formData,
-                    credentials: 'include'
-                });
-
-                document.body.style.cursor = 'default';
-                applyButton.value = applyButtonVal;
-
-                if (response.ok) {
-                    alert('Parameters applied successfully 😎');
-                    window.location.reload(true);
-                } else {
-                    const errorMessage = await response.text();
-                    console.error(errorMessage, response.status);
-                    alert('⚠️ Session expired! Please login again.');
-                    window.location.href = '/login';
-                }           
-            } catch (error) {
-                console.error('Error:', error);
-            }
-        }
-
-        const logout = async (event) => {
-            event.preventDefault();
-
-            try {
-                const response = await fetch('/logout', {
-                    method: 'GET',
-                    credentials: 'same-origin'
-                });
-            
-                if (response.ok) {
-                    window.location.href = '/login';
-                } else {
-                    console.error('Failed to log out:', response.status);
-                }
-            } catch (error) {
-                console.error('Error:', error);
-            }
-        }
-
-        const resetPassword = async (event) => {
-            event.preventDefault();
-            const modal = document.getElementById('myModal');
-            const newPasswordInput = document.getElementById('newPassword');
-            const confirmPasswordInput = document.getElementById('confirmPassword');
-            const passwordError = document.getElementById('passwordError');             
-            const newPassword = newPasswordInput.value;
-            const confirmPassword = confirmPasswordInput.value;
-    
-            if (newPassword !== confirmPassword) {
-                passwordError.textContent = "Passwords do not match";
-                return false;
-            }
-
-            const hasCapitalLetter = /[A-Z]/.test(newPassword);
-            const hasNumber = /[0-9]/.test(newPassword);
-            const isLongEnough = newPassword.length >= 8;
-
-            if (!(hasCapitalLetter && hasNumber && isLongEnough)) {
-                passwordError.textContent = '⚠️ Password must contain at least one capital letter, one number, and be at least 8 characters long.';
-                return false;
-            }
-                    
-            try {
-                const response = await fetch('/panel/password', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'text/plain'
-                    },
-                    body: newPassword,
-                    credentials: 'same-origin'
-                });
-            
-                if (response.ok) {
-                    modal.style.display = "none";
-                    document.body.style.overflow = "";
-                    alert("Password changed successfully! 👍");
-                    window.location.href = '/login';
-                } else if (response.status === 401) {
-                    const errorMessage = await response.text();
-                    passwordError.textContent = '⚠️ ' + errorMessage;
-                    console.error(errorMessage, response.status);
-                    alert('⚠️ Session expired! Please login again.');
-                    window.location.href = '/login';
-                } else {
-                    const errorMessage = await response.text();
-                    passwordError.textContent = '⚠️ ' + errorMessage;
-                    console.error(errorMessage, response.status);
-                    return false;
-                }
-            } catch (error) {
-                console.error('Error:', error);
-            }
-        }
-	</script>
-	</body>	
-	</html>`;
-
-    return html;
-}
-
-const renderLoginPage = async () => {
-    const html = `
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>User Login</title>
-    <style>
-
-        html, body { height: 100%; margin: 0; }
-        body {
-            font-family: system-ui;
-            background-color: #f9f9f9;
-            position: relative;
-            overflow: hidden;
-        }
-        .container {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: 90%;
-        }
-        h1 { font-size: 2.5rem; text-align: center; color: #09639f; margin: 0 auto 30px; text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.25); }        
-        h2 {text-align: center;}
-        .form-container {
-            background: #f9f9f9;
-            border: 1px solid #eaeaea;
-            border-radius: 10px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-            padding: 20px;
-        }
-        .form-control { margin-bottom: 15px; display: flex; align-items: center; }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            padding-right: 20px;
-            font-size: 110%;
-            font-weight: 600;
-            color: #333;
-        }
-        input[type="text"],
-        input[type="password"] {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            color: #333;
-        }
-        button {
-            display: block;
-            width: 100%;
-            padding: 10px;
-            font-size: 16px;
-            font-weight: 600;
-            border: none;
-            border-radius: 5px;
-            color: #fff;
-            background-color: #09639f;
-            cursor: pointer;
-            transition: background-color 0.3s ease;
-        }
-        button:hover {background-color: #2980b9;}
-        @media only screen and (min-width: 768px) {
-            .container { width: 30%; }
-        }
-    </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>BPB Panel <span style="font-size: smaller;">${panelVersion}</span> 💦</h1>
-            <div class="form-container">
-                <h2>User Login</h2>
-                <form id="loginForm">
-                    <div class="form-control">
-                        <label for="password">Password</label>
-                        <input type="password" id="password" name="password" required>
-                    </div>
-                    <div id="passwordError" style="color: red; margin-bottom: 10px;"></div>
-                    <button type="submit" class="button">Login</button>
-                </form>
-            </div>
-        </div>
-    <script>
-        document.getElementById('loginForm').addEventListener('submit', async (event) => {
-            event.preventDefault();
-            const password = document.getElementById('password').value;
-
-            try {
-                const response = await fetch('/login', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'text/plain'
-                    },
-                    body: password
-                });
-            
-                if (response.ok) {
-                    window.location.href = '/panel';
-                } else {
-                    passwordError.textContent = '⚠️ Wrong Password!';
-                    const errorMessage = await response.text();
-                    console.error('Login failed:', errorMessage);
-                }
-            } catch (error) {
-                console.error('Error during login:', error);
-            }
-        });
-    </script>
-    </body>
-    </html>`;
-
-    return html;
-}
-
-const renderErrorPage = (message, error, refer) => {
-    return `
-    <!DOCTYPE html>
-    <html lang="en">
-
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Error Page</title>
-        <style>
-            body,
-            html {
-                height: 100%;
-                margin: 0;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                font-family: system-ui;
-            }
-            h1 { font-size: 2.5rem; text-align: center; color: #09639f; text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.25); }
-            #error-container { text-align: center; }
-        </style>
-    </head>
-
-    <body>
-        <div id="error-container">
-            <h1>BPB Panel <span style="font-size: smaller;">${panelVersion}</span> 💦</h1>
-            <div id="error-message">
-                <h2>${message} ${refer 
-                    ? 'Please try again or refer to <a href="https://github.com/bia-pain-bache/BPB-Worker-Panel/blob/main/README.md">documents</a>' 
-                    : ''}
-                </h2>
-                <p><b>${error ? `⚠️ ${error}` : ''}</b></p>
-            </div>
-        </div>
-    </body>
-
-    </html>`;
-}
-
-const xrayConfigTemp = {
-    remarks: "",
-    log: {
-        loglevel: "warning",
-    },
-    dns: {},
-    inbounds: [
-        {
-            port: 10808,
-            protocol: "socks",
-            settings: {
-                auth: "noauth",
-                udp: true,
-                userLevel: 8,
-            },
-            sniffing: {
-                destOverride: ["http", "tls"],
-                enabled: true,
-                routeOnly: true
-            },
-            tag: "socks-in",
-        },
-        {
-            port: 10809,
-            protocol: "http",
-            settings: {
-                auth: "noauth",
-                udp: true,
-                userLevel: 8,
-            },
-            sniffing: {
-                destOverride: ["http", "tls"],
-                enabled: true,
-                routeOnly: true
-            },
-            tag: "http-in",
-        },
-        {
-            listen: "127.0.0.1",
-            port: 10853,
-            protocol: "dokodemo-door",
-            settings: {
-              address: "1.1.1.1",
-              network: "tcp,udp",
-              port: 53
-            },
-            tag: "dns-in"
-        }
-    ],
-    outbounds: [
-        {
-            tag: "fragment",
-            protocol: "freedom",
-            settings: {
-                fragment: {
-                    packets: "tlshello",
-                    length: "",
-                    interval: "",
-                },
-            },
-            streamSettings: {
-                sockopt: {
-                    tcpKeepAliveIdle: 100,
-                    tcpNoDelay: true,
-                },
-            },
-        },
-        {
-            protocol: "dns",
-            tag: "dns-out"
-        },
-        {
-            protocol: "freedom",
-            settings: {},
-            tag: "direct",
-        },
-        {
-            protocol: "blackhole",
-            settings: {
-                response: {
-                    type: "http",
-                },
-            },
-            tag: "block",
-        },
-    ],
-    policy: {
-        levels: {
-            8: {
-                connIdle: 300,
-                downlinkOnly: 1,
-                handshake: 4,
-                uplinkOnly: 1,
-            }
-        },
-        system: {
-            statsOutboundUplink: true,
-            statsOutboundDownlink: true,
-        }
-    },
-    routing: {
-        domainStrategy: "IPIfNonMatch",
-        rules: [],
-        balancers: [
-            {
-                tag: "all",
-                selector: ["prox"],
-                strategy: {
-                    type: "leastPing",
-                },
-            }
-        ]
-    },
-    observatory: {
-        probeInterval: "30s",
-        probeURL: "https://api.github.com/_private/browser/stats",
-        subjectSelector: ["prox"],
-        EnableConcurrency: true,
-    },
-    stats: {},
-};
-  
-const xrayOutboundTemp = 
-{
-    mux: {
-        concurrency: 8,
-        enabled: true,
-        xudpConcurrency: 8,
-        xudpProxyUDP443: "reject"
-    },
-    protocol: "vless",
-    settings: {
-        vnext: [
-            {
-                address: "",
-                port: 443,
-                users: [
-                    {
-                        encryption: "none",
-                        flow: "",
-                        id: "",
-                        level: 8,
-                        security: "auto"
-                    }
-                ]
-            }
-        ]
-    },
-    streamSettings: {
-        network: "ws",
-        security: "tls",
-        sockopt: {
-            dialerProxy: "fragment",
-            tcpKeepAliveIdle: 100,
-            tcpNoDelay: true
-        },
-        tlsSettings: {
-            allowInsecure: false,
-            fingerprint: "chrome",
-            alpn: ["h2", "http/1.1"],
-            serverName: ""
-        },
-        wsSettings: {
-            headers: {Host: ""},
-            path: ""
-        },
-        grpcSettings: {
-            authority: "",
-            multiMode: false,
-            serviceName: ""
-        },
-        realitySettings: {
-            fingerprint: "",
-            publicKey: "",
-            serverName: "",
-            shortId: "",
-            spiderX: ""
-        },
-        tcpSettings: {
-            header: {
-                request: {
-                    headers: {
-                        Host: []
-                    },
-                    method: "GET",
-                    path: [],
-                    version: "1.1"
-                },
-                response: {
-                    headers: {
-                        "Content-Type": ["application/octet-stream"]
-                    },
-                    reason: "OK",
-                    status: "200",
-                    version: "1.1"
-                },
-                type: "http"
-            }
-        }
-    },
-    tag: "proxy"
-};
-
-const singboxConfigTemp = {
-    log: {
-        level: "warn",
-        timestamp: true
-    },
-    dns: {
-        servers: [
-            {
-                address: "https://8.8.8.8/dns-query",
-                address_resolver: "dns-direct",
-                strategy: "prefer_ipv4",
-                tag: "dns-remote"
-            },
-            {
-                address: "8.8.8.8",
-                address_resolver: "dns-local",
-                strategy: "prefer_ipv4",
-                detour: "direct",
-                tag: "dns-direct"
-            },
-            {
-                address: "local",
-                tag: "dns-local"
-            },
-            {
-                address: "rcode://success",
-                tag: "dns-block"
-            }
-        ],
-        rules: [
-            {
-                domain_suffix: ".ir",
-                server: "dns-direct"
-            },
-            {
-                disable_cache: true,
-                rule_set: [
-                    "geosite-category-ads-all",
-                    "geosite-malware",
-                    "geosite-phishing",
-                    "geosite-cryptominers"
-                ],
-                server: "dns-block"
-            }
-        ],
-        independent_cache: true
-    },
-    inbounds: [
-        {
-            type: "direct",
-            tag: "dns-in",
-            listen: "127.0.0.1",
-            listen_port: 6450,
-            override_address: "8.8.8.8",
-            override_port: 53
-        },
-        {
-            type: "tun",
-            tag: "tun-in",
-            inet4_address: "172.19.0.1/28",
-            inet6_address: "fdfe:dcba:9876::1/126",
-            mtu: 9000,
-            auto_route: true,
-            strict_route: true,
-            endpoint_independent_nat: true,
-            stack: "mixed",
-            sniff: true,
-            sniff_override_destination: true
-        },
-        {
-            type: "mixed",
-            tag: "mixed-in",
-            listen: "127.0.0.1",
-            listen_port: 2080,
-            sniff: true,
-            sniff_override_destination: true
-        }
-    ],
-    outbounds: [
-        {
-            type: "selector",
-            tag: "proxy",
-            outbounds: ["💦 Best-Ping 💥"]
-        },
-        {
-            type: "urltest",
-            tag: "💦 Best-Ping 💥",
-            outbounds: [],
-            url: "https://www.gstatic.com/generate_204",
-            interval: "30s",
-            tolerance: 50
-        },
-        {
-            type: "direct",
-            tag: "direct"
-        },
-        {
-            type: "block",
-            tag: "block"
-        },
-        {
-            type: "dns",
-            tag: "dns-out"
-        }
-    ],
-    route: {
-        rules: [
-            {
-                port: 53,
-                outbound: "dns-out"
-            },
-            {
-                inbound: "dns-in",
-                outbound: "dns-out"
-            },
-            {
-                network: "udp",
-                port: 443,
-                protocol: "quic",
-                outbound: "block"
-            },
-            {
-                ip_is_private: true,
-                outbound: "direct"
-            },
-            {
-                rule_set: [
-                    "geosite-category-ads-all",
-                    "geosite-malware",
-                    "geosite-phishing",
-                    "geosite-cryptominers",
-                    "geoip-malware",
-                    "geoip-phishing"
-                ],
-                outbound: "block"
-            },
-            {
-                rule_set: ["geosite-ir", "geoip-ir"],
-                outbound: "direct"
-            },
-            {
-                ip_cidr: ["224.0.0.0/3", "ff00::/8"],
-                source_ip_cidr: ["224.0.0.0/3", "ff00::/8"],
-                outbound: "block"
-            }
-        ],
-        rule_set: [
-            {
-                type: "remote",
-                tag: "geosite-ir",
-                format: "binary",
-                url: "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-ir.srs",
-                download_detour: "direct"
-            },
-            {
-                type: "remote",
-                tag: "geosite-category-ads-all",
-                format: "binary",
-                url: "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-category-ads-all.srs",
-                download_detour: "direct"
-            },
-            {
-                type: "remote",
-                tag: "geosite-malware",
-                format: "binary",
-                url: "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-malware.srs",
-                download_detour: "direct"
-            },
-            {
-                type: "remote",
-                tag: "geosite-phishing",
-                format: "binary",
-                url: "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-phishing.srs",
-                download_detour: "direct"
-            },
-            {
-                type: "remote",
-                tag: "geosite-cryptominers",
-                format: "binary",
-                url: "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-cryptominers.srs",
-                download_detour: "direct"
-            },
-            {
-                type: "remote",
-                tag: "geoip-ir",
-                format: "binary",
-                url: "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geoip-ir.srs",
-                download_detour: "direct"
-            },
-            {
-                type: "remote",
-                tag: "geoip-malware",
-                format: "binary",
-                url: "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geoip-malware.srs",
-                download_detour: "direct"
-            },
-            {
-                type: "remote",
-                tag: "geoip-phishing",
-                format: "binary",
-                url: "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geoip-phishing.srs",
-                download_detour: "direct"
-            }
-        ],
-        auto_detect_interface: true,
-        override_android_vpn: true,
-        final: "proxy"
-    },
-    experimental: {
-        cache_file: {
-            enabled: true
-        },
-        clash_api: {
-            external_controller: "0.0.0.0:9090",
-            external_ui: "yacd",
-            external_ui_download_url: "https://github.com/MetaCubeX/Yacd-meta/archive/gh-pages.zip",
-            external_ui_download_detour: "direct",
-            secret: "",
-            default_mode: "rule"
-        }
+    function utf8Write(buf, string, offset, length) {
+      return blitBuffer(utf8ToBytes(string, buf.length - offset), buf, offset, length);
     }
-};
-
-const singboxOutboundTemp = {
-    type: "vless",
-    server: "",
-    server_port: 443,
-    uuid: "",
-    domain_strategy: "prefer_ipv6",
-    packet_encoding: "",
-    tls: {
-        alpn: [
-            "http/1.1"
-        ],
-        enabled: true,
-        insecure: false,
-        server_name: "",
-        utls: {
-            enabled: true,
-            fingerprint: "randomized"
+    function asciiWrite(buf, string, offset, length) {
+      return blitBuffer(asciiToBytes(string), buf, offset, length);
+    }
+    function base64Write(buf, string, offset, length) {
+      return blitBuffer(base64ToBytes(string), buf, offset, length);
+    }
+    function ucs2Write(buf, string, offset, length) {
+      return blitBuffer(utf16leToBytes(string, buf.length - offset), buf, offset, length);
+    }
+    Buffer3.prototype.write = function write(string, offset, length, encoding) {
+      if (offset === void 0) {
+        encoding = "utf8";
+        length = this.length;
+        offset = 0;
+      } else if (length === void 0 && typeof offset === "string") {
+        encoding = offset;
+        length = this.length;
+        offset = 0;
+      } else if (isFinite(offset)) {
+        offset = offset >>> 0;
+        if (isFinite(length)) {
+          length = length >>> 0;
+          if (encoding === void 0)
+            encoding = "utf8";
+        } else {
+          encoding = length;
+          length = void 0;
         }
-    },
-    transport: {
-        early_data_header_name: "Sec-WebSocket-Protocol",
-        max_early_data: 2560,
+      } else {
+        throw new Error(
+          "Buffer.write(string, encoding, offset[, length]) is no longer supported"
+        );
+      }
+      const remaining = this.length - offset;
+      if (length === void 0 || length > remaining)
+        length = remaining;
+      if (string.length > 0 && (length < 0 || offset < 0) || offset > this.length) {
+        throw new RangeError("Attempt to write outside buffer bounds");
+      }
+      if (!encoding)
+        encoding = "utf8";
+      let loweredCase = false;
+      for (; ; ) {
+        switch (encoding) {
+          case "hex":
+            return hexWrite(this, string, offset, length);
+          case "utf8":
+          case "utf-8":
+            return utf8Write(this, string, offset, length);
+          case "ascii":
+          case "latin1":
+          case "binary":
+            return asciiWrite(this, string, offset, length);
+          case "base64":
+            return base64Write(this, string, offset, length);
+          case "ucs2":
+          case "ucs-2":
+          case "utf16le":
+          case "utf-16le":
+            return ucs2Write(this, string, offset, length);
+          default:
+            if (loweredCase)
+              throw new TypeError("Unknown encoding: " + encoding);
+            encoding = ("" + encoding).toLowerCase();
+            loweredCase = true;
+        }
+      }
+    };
+    Buffer3.prototype.toJSON = function toJSON() {
+      return {
+        type: "Buffer",
+        data: Array.prototype.slice.call(this._arr || this, 0)
+      };
+    };
+    function base64Slice(buf, start, end) {
+      if (start === 0 && end === buf.length) {
+        return base64.fromByteArray(buf);
+      } else {
+        return base64.fromByteArray(buf.slice(start, end));
+      }
+    }
+    function utf8Slice(buf, start, end) {
+      end = Math.min(buf.length, end);
+      const res = [];
+      let i = start;
+      while (i < end) {
+        const firstByte = buf[i];
+        let codePoint = null;
+        let bytesPerSequence = firstByte > 239 ? 4 : firstByte > 223 ? 3 : firstByte > 191 ? 2 : 1;
+        if (i + bytesPerSequence <= end) {
+          let secondByte, thirdByte, fourthByte, tempCodePoint;
+          switch (bytesPerSequence) {
+            case 1:
+              if (firstByte < 128) {
+                codePoint = firstByte;
+              }
+              break;
+            case 2:
+              secondByte = buf[i + 1];
+              if ((secondByte & 192) === 128) {
+                tempCodePoint = (firstByte & 31) << 6 | secondByte & 63;
+                if (tempCodePoint > 127) {
+                  codePoint = tempCodePoint;
+                }
+              }
+              break;
+            case 3:
+              secondByte = buf[i + 1];
+              thirdByte = buf[i + 2];
+              if ((secondByte & 192) === 128 && (thirdByte & 192) === 128) {
+                tempCodePoint = (firstByte & 15) << 12 | (secondByte & 63) << 6 | thirdByte & 63;
+                if (tempCodePoint > 2047 && (tempCodePoint < 55296 || tempCodePoint > 57343)) {
+                  codePoint = tempCodePoint;
+                }
+              }
+              break;
+            case 4:
+              secondByte = buf[i + 1];
+              thirdByte = buf[i + 2];
+              fourthByte = buf[i + 3];
+              if ((secondByte & 192) === 128 && (thirdByte & 192) === 128 && (fourthByte & 192) === 128) {
+                tempCodePoint = (firstByte & 15) << 18 | (secondByte & 63) << 12 | (thirdByte & 63) << 6 | fourthByte & 63;
+                if (tempCodePoint > 65535 && tempCodePoint < 1114112) {
+                  codePoint = tempCodePoint;
+                }
+              }
+          }
+        }
+        if (codePoint === null) {
+          codePoint = 65533;
+          bytesPerSequence = 1;
+        } else if (codePoint > 65535) {
+          codePoint -= 65536;
+          res.push(codePoint >>> 10 & 1023 | 55296);
+          codePoint = 56320 | codePoint & 1023;
+        }
+        res.push(codePoint);
+        i += bytesPerSequence;
+      }
+      return decodeCodePointsArray(res);
+    }
+    var MAX_ARGUMENTS_LENGTH = 4096;
+    function decodeCodePointsArray(codePoints) {
+      const len = codePoints.length;
+      if (len <= MAX_ARGUMENTS_LENGTH) {
+        return String.fromCharCode.apply(String, codePoints);
+      }
+      let res = "";
+      let i = 0;
+      while (i < len) {
+        res += String.fromCharCode.apply(
+          String,
+          codePoints.slice(i, i += MAX_ARGUMENTS_LENGTH)
+        );
+      }
+      return res;
+    }
+    function asciiSlice(buf, start, end) {
+      let ret = "";
+      end = Math.min(buf.length, end);
+      for (let i = start; i < end; ++i) {
+        ret += String.fromCharCode(buf[i] & 127);
+      }
+      return ret;
+    }
+    function latin1Slice(buf, start, end) {
+      let ret = "";
+      end = Math.min(buf.length, end);
+      for (let i = start; i < end; ++i) {
+        ret += String.fromCharCode(buf[i]);
+      }
+      return ret;
+    }
+    function hexSlice(buf, start, end) {
+      const len = buf.length;
+      if (!start || start < 0)
+        start = 0;
+      if (!end || end < 0 || end > len)
+        end = len;
+      let out = "";
+      for (let i = start; i < end; ++i) {
+        out += hexSliceLookupTable[buf[i]];
+      }
+      return out;
+    }
+    function utf16leSlice(buf, start, end) {
+      const bytes = buf.slice(start, end);
+      let res = "";
+      for (let i = 0; i < bytes.length - 1; i += 2) {
+        res += String.fromCharCode(bytes[i] + bytes[i + 1] * 256);
+      }
+      return res;
+    }
+    Buffer3.prototype.slice = function slice(start, end) {
+      const len = this.length;
+      start = ~~start;
+      end = end === void 0 ? len : ~~end;
+      if (start < 0) {
+        start += len;
+        if (start < 0)
+          start = 0;
+      } else if (start > len) {
+        start = len;
+      }
+      if (end < 0) {
+        end += len;
+        if (end < 0)
+          end = 0;
+      } else if (end > len) {
+        end = len;
+      }
+      if (end < start)
+        end = start;
+      const newBuf = this.subarray(start, end);
+      Object.setPrototypeOf(newBuf, Buffer3.prototype);
+      return newBuf;
+    };
+    function checkOffset(offset, ext, length) {
+      if (offset % 1 !== 0 || offset < 0)
+        throw new RangeError("offset is not uint");
+      if (offset + ext > length)
+        throw new RangeError("Trying to access beyond buffer length");
+    }
+    Buffer3.prototype.readUintLE = Buffer3.prototype.readUIntLE = function readUIntLE(offset, byteLength2, noAssert) {
+      offset = offset >>> 0;
+      byteLength2 = byteLength2 >>> 0;
+      if (!noAssert)
+        checkOffset(offset, byteLength2, this.length);
+      let val = this[offset];
+      let mul = 1;
+      let i = 0;
+      while (++i < byteLength2 && (mul *= 256)) {
+        val += this[offset + i] * mul;
+      }
+      return val;
+    };
+    Buffer3.prototype.readUintBE = Buffer3.prototype.readUIntBE = function readUIntBE(offset, byteLength2, noAssert) {
+      offset = offset >>> 0;
+      byteLength2 = byteLength2 >>> 0;
+      if (!noAssert) {
+        checkOffset(offset, byteLength2, this.length);
+      }
+      let val = this[offset + --byteLength2];
+      let mul = 1;
+      while (byteLength2 > 0 && (mul *= 256)) {
+        val += this[offset + --byteLength2] * mul;
+      }
+      return val;
+    };
+    Buffer3.prototype.readUint8 = Buffer3.prototype.readUInt8 = function readUInt8(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 1, this.length);
+      return this[offset];
+    };
+    Buffer3.prototype.readUint16LE = Buffer3.prototype.readUInt16LE = function readUInt16LE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 2, this.length);
+      return this[offset] | this[offset + 1] << 8;
+    };
+    Buffer3.prototype.readUint16BE = Buffer3.prototype.readUInt16BE = function readUInt16BE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 2, this.length);
+      return this[offset] << 8 | this[offset + 1];
+    };
+    Buffer3.prototype.readUint32LE = Buffer3.prototype.readUInt32LE = function readUInt32LE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 4, this.length);
+      return (this[offset] | this[offset + 1] << 8 | this[offset + 2] << 16) + this[offset + 3] * 16777216;
+    };
+    Buffer3.prototype.readUint32BE = Buffer3.prototype.readUInt32BE = function readUInt32BE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 4, this.length);
+      return this[offset] * 16777216 + (this[offset + 1] << 16 | this[offset + 2] << 8 | this[offset + 3]);
+    };
+    Buffer3.prototype.readBigUInt64LE = defineBigIntMethod(function readBigUInt64LE(offset) {
+      offset = offset >>> 0;
+      validateNumber(offset, "offset");
+      const first = this[offset];
+      const last = this[offset + 7];
+      if (first === void 0 || last === void 0) {
+        boundsError(offset, this.length - 8);
+      }
+      const lo = first + this[++offset] * 2 ** 8 + this[++offset] * 2 ** 16 + this[++offset] * 2 ** 24;
+      const hi = this[++offset] + this[++offset] * 2 ** 8 + this[++offset] * 2 ** 16 + last * 2 ** 24;
+      return BigInt(lo) + (BigInt(hi) << BigInt(32));
+    });
+    Buffer3.prototype.readBigUInt64BE = defineBigIntMethod(function readBigUInt64BE(offset) {
+      offset = offset >>> 0;
+      validateNumber(offset, "offset");
+      const first = this[offset];
+      const last = this[offset + 7];
+      if (first === void 0 || last === void 0) {
+        boundsError(offset, this.length - 8);
+      }
+      const hi = first * 2 ** 24 + this[++offset] * 2 ** 16 + this[++offset] * 2 ** 8 + this[++offset];
+      const lo = this[++offset] * 2 ** 24 + this[++offset] * 2 ** 16 + this[++offset] * 2 ** 8 + last;
+      return (BigInt(hi) << BigInt(32)) + BigInt(lo);
+    });
+    Buffer3.prototype.readIntLE = function readIntLE(offset, byteLength2, noAssert) {
+      offset = offset >>> 0;
+      byteLength2 = byteLength2 >>> 0;
+      if (!noAssert)
+        checkOffset(offset, byteLength2, this.length);
+      let val = this[offset];
+      let mul = 1;
+      let i = 0;
+      while (++i < byteLength2 && (mul *= 256)) {
+        val += this[offset + i] * mul;
+      }
+      mul *= 128;
+      if (val >= mul)
+        val -= Math.pow(2, 8 * byteLength2);
+      return val;
+    };
+    Buffer3.prototype.readIntBE = function readIntBE(offset, byteLength2, noAssert) {
+      offset = offset >>> 0;
+      byteLength2 = byteLength2 >>> 0;
+      if (!noAssert)
+        checkOffset(offset, byteLength2, this.length);
+      let i = byteLength2;
+      let mul = 1;
+      let val = this[offset + --i];
+      while (i > 0 && (mul *= 256)) {
+        val += this[offset + --i] * mul;
+      }
+      mul *= 128;
+      if (val >= mul)
+        val -= Math.pow(2, 8 * byteLength2);
+      return val;
+    };
+    Buffer3.prototype.readInt8 = function readInt8(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 1, this.length);
+      if (!(this[offset] & 128))
+        return this[offset];
+      return (255 - this[offset] + 1) * -1;
+    };
+    Buffer3.prototype.readInt16LE = function readInt16LE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 2, this.length);
+      const val = this[offset] | this[offset + 1] << 8;
+      return val & 32768 ? val | 4294901760 : val;
+    };
+    Buffer3.prototype.readInt16BE = function readInt16BE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 2, this.length);
+      const val = this[offset + 1] | this[offset] << 8;
+      return val & 32768 ? val | 4294901760 : val;
+    };
+    Buffer3.prototype.readInt32LE = function readInt32LE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 4, this.length);
+      return this[offset] | this[offset + 1] << 8 | this[offset + 2] << 16 | this[offset + 3] << 24;
+    };
+    Buffer3.prototype.readInt32BE = function readInt32BE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 4, this.length);
+      return this[offset] << 24 | this[offset + 1] << 16 | this[offset + 2] << 8 | this[offset + 3];
+    };
+    Buffer3.prototype.readBigInt64LE = defineBigIntMethod(function readBigInt64LE(offset) {
+      offset = offset >>> 0;
+      validateNumber(offset, "offset");
+      const first = this[offset];
+      const last = this[offset + 7];
+      if (first === void 0 || last === void 0) {
+        boundsError(offset, this.length - 8);
+      }
+      const val = this[offset + 4] + this[offset + 5] * 2 ** 8 + this[offset + 6] * 2 ** 16 + (last << 24);
+      return (BigInt(val) << BigInt(32)) + BigInt(first + this[++offset] * 2 ** 8 + this[++offset] * 2 ** 16 + this[++offset] * 2 ** 24);
+    });
+    Buffer3.prototype.readBigInt64BE = defineBigIntMethod(function readBigInt64BE(offset) {
+      offset = offset >>> 0;
+      validateNumber(offset, "offset");
+      const first = this[offset];
+      const last = this[offset + 7];
+      if (first === void 0 || last === void 0) {
+        boundsError(offset, this.length - 8);
+      }
+      const val = (first << 24) + this[++offset] * 2 ** 16 + this[++offset] * 2 ** 8 + this[++offset];
+      return (BigInt(val) << BigInt(32)) + BigInt(this[++offset] * 2 ** 24 + this[++offset] * 2 ** 16 + this[++offset] * 2 ** 8 + last);
+    });
+    Buffer3.prototype.readFloatLE = function readFloatLE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 4, this.length);
+      return ieee754.read(this, offset, true, 23, 4);
+    };
+    Buffer3.prototype.readFloatBE = function readFloatBE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 4, this.length);
+      return ieee754.read(this, offset, false, 23, 4);
+    };
+    Buffer3.prototype.readDoubleLE = function readDoubleLE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 8, this.length);
+      return ieee754.read(this, offset, true, 52, 8);
+    };
+    Buffer3.prototype.readDoubleBE = function readDoubleBE(offset, noAssert) {
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkOffset(offset, 8, this.length);
+      return ieee754.read(this, offset, false, 52, 8);
+    };
+    function checkInt(buf, value, offset, ext, max, min) {
+      if (!Buffer3.isBuffer(buf))
+        throw new TypeError('"buffer" argument must be a Buffer instance');
+      if (value > max || value < min)
+        throw new RangeError('"value" argument is out of bounds');
+      if (offset + ext > buf.length)
+        throw new RangeError("Index out of range");
+    }
+    Buffer3.prototype.writeUintLE = Buffer3.prototype.writeUIntLE = function writeUIntLE(value, offset, byteLength2, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      byteLength2 = byteLength2 >>> 0;
+      if (!noAssert) {
+        const maxBytes = Math.pow(2, 8 * byteLength2) - 1;
+        checkInt(this, value, offset, byteLength2, maxBytes, 0);
+      }
+      let mul = 1;
+      let i = 0;
+      this[offset] = value & 255;
+      while (++i < byteLength2 && (mul *= 256)) {
+        this[offset + i] = value / mul & 255;
+      }
+      return offset + byteLength2;
+    };
+    Buffer3.prototype.writeUintBE = Buffer3.prototype.writeUIntBE = function writeUIntBE(value, offset, byteLength2, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      byteLength2 = byteLength2 >>> 0;
+      if (!noAssert) {
+        const maxBytes = Math.pow(2, 8 * byteLength2) - 1;
+        checkInt(this, value, offset, byteLength2, maxBytes, 0);
+      }
+      let i = byteLength2 - 1;
+      let mul = 1;
+      this[offset + i] = value & 255;
+      while (--i >= 0 && (mul *= 256)) {
+        this[offset + i] = value / mul & 255;
+      }
+      return offset + byteLength2;
+    };
+    Buffer3.prototype.writeUint8 = Buffer3.prototype.writeUInt8 = function writeUInt8(value, offset, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkInt(this, value, offset, 1, 255, 0);
+      this[offset] = value & 255;
+      return offset + 1;
+    };
+    Buffer3.prototype.writeUint16LE = Buffer3.prototype.writeUInt16LE = function writeUInt16LE(value, offset, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkInt(this, value, offset, 2, 65535, 0);
+      this[offset] = value & 255;
+      this[offset + 1] = value >>> 8;
+      return offset + 2;
+    };
+    Buffer3.prototype.writeUint16BE = Buffer3.prototype.writeUInt16BE = function writeUInt16BE(value, offset, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkInt(this, value, offset, 2, 65535, 0);
+      this[offset] = value >>> 8;
+      this[offset + 1] = value & 255;
+      return offset + 2;
+    };
+    Buffer3.prototype.writeUint32LE = Buffer3.prototype.writeUInt32LE = function writeUInt32LE(value, offset, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkInt(this, value, offset, 4, 4294967295, 0);
+      this[offset + 3] = value >>> 24;
+      this[offset + 2] = value >>> 16;
+      this[offset + 1] = value >>> 8;
+      this[offset] = value & 255;
+      return offset + 4;
+    };
+    Buffer3.prototype.writeUint32BE = Buffer3.prototype.writeUInt32BE = function writeUInt32BE(value, offset, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkInt(this, value, offset, 4, 4294967295, 0);
+      this[offset] = value >>> 24;
+      this[offset + 1] = value >>> 16;
+      this[offset + 2] = value >>> 8;
+      this[offset + 3] = value & 255;
+      return offset + 4;
+    };
+    function wrtBigUInt64LE(buf, value, offset, min, max) {
+      checkIntBI(value, min, max, buf, offset, 7);
+      let lo = Number(value & BigInt(4294967295));
+      buf[offset++] = lo;
+      lo = lo >> 8;
+      buf[offset++] = lo;
+      lo = lo >> 8;
+      buf[offset++] = lo;
+      lo = lo >> 8;
+      buf[offset++] = lo;
+      let hi = Number(value >> BigInt(32) & BigInt(4294967295));
+      buf[offset++] = hi;
+      hi = hi >> 8;
+      buf[offset++] = hi;
+      hi = hi >> 8;
+      buf[offset++] = hi;
+      hi = hi >> 8;
+      buf[offset++] = hi;
+      return offset;
+    }
+    function wrtBigUInt64BE(buf, value, offset, min, max) {
+      checkIntBI(value, min, max, buf, offset, 7);
+      let lo = Number(value & BigInt(4294967295));
+      buf[offset + 7] = lo;
+      lo = lo >> 8;
+      buf[offset + 6] = lo;
+      lo = lo >> 8;
+      buf[offset + 5] = lo;
+      lo = lo >> 8;
+      buf[offset + 4] = lo;
+      let hi = Number(value >> BigInt(32) & BigInt(4294967295));
+      buf[offset + 3] = hi;
+      hi = hi >> 8;
+      buf[offset + 2] = hi;
+      hi = hi >> 8;
+      buf[offset + 1] = hi;
+      hi = hi >> 8;
+      buf[offset] = hi;
+      return offset + 8;
+    }
+    Buffer3.prototype.writeBigUInt64LE = defineBigIntMethod(function writeBigUInt64LE(value, offset = 0) {
+      return wrtBigUInt64LE(this, value, offset, BigInt(0), BigInt("0xffffffffffffffff"));
+    });
+    Buffer3.prototype.writeBigUInt64BE = defineBigIntMethod(function writeBigUInt64BE(value, offset = 0) {
+      return wrtBigUInt64BE(this, value, offset, BigInt(0), BigInt("0xffffffffffffffff"));
+    });
+    Buffer3.prototype.writeIntLE = function writeIntLE(value, offset, byteLength2, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert) {
+        const limit = Math.pow(2, 8 * byteLength2 - 1);
+        checkInt(this, value, offset, byteLength2, limit - 1, -limit);
+      }
+      let i = 0;
+      let mul = 1;
+      let sub = 0;
+      this[offset] = value & 255;
+      while (++i < byteLength2 && (mul *= 256)) {
+        if (value < 0 && sub === 0 && this[offset + i - 1] !== 0) {
+          sub = 1;
+        }
+        this[offset + i] = (value / mul >> 0) - sub & 255;
+      }
+      return offset + byteLength2;
+    };
+    Buffer3.prototype.writeIntBE = function writeIntBE(value, offset, byteLength2, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert) {
+        const limit = Math.pow(2, 8 * byteLength2 - 1);
+        checkInt(this, value, offset, byteLength2, limit - 1, -limit);
+      }
+      let i = byteLength2 - 1;
+      let mul = 1;
+      let sub = 0;
+      this[offset + i] = value & 255;
+      while (--i >= 0 && (mul *= 256)) {
+        if (value < 0 && sub === 0 && this[offset + i + 1] !== 0) {
+          sub = 1;
+        }
+        this[offset + i] = (value / mul >> 0) - sub & 255;
+      }
+      return offset + byteLength2;
+    };
+    Buffer3.prototype.writeInt8 = function writeInt8(value, offset, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkInt(this, value, offset, 1, 127, -128);
+      if (value < 0)
+        value = 255 + value + 1;
+      this[offset] = value & 255;
+      return offset + 1;
+    };
+    Buffer3.prototype.writeInt16LE = function writeInt16LE(value, offset, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkInt(this, value, offset, 2, 32767, -32768);
+      this[offset] = value & 255;
+      this[offset + 1] = value >>> 8;
+      return offset + 2;
+    };
+    Buffer3.prototype.writeInt16BE = function writeInt16BE(value, offset, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkInt(this, value, offset, 2, 32767, -32768);
+      this[offset] = value >>> 8;
+      this[offset + 1] = value & 255;
+      return offset + 2;
+    };
+    Buffer3.prototype.writeInt32LE = function writeInt32LE(value, offset, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkInt(this, value, offset, 4, 2147483647, -2147483648);
+      this[offset] = value & 255;
+      this[offset + 1] = value >>> 8;
+      this[offset + 2] = value >>> 16;
+      this[offset + 3] = value >>> 24;
+      return offset + 4;
+    };
+    Buffer3.prototype.writeInt32BE = function writeInt32BE(value, offset, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert)
+        checkInt(this, value, offset, 4, 2147483647, -2147483648);
+      if (value < 0)
+        value = 4294967295 + value + 1;
+      this[offset] = value >>> 24;
+      this[offset + 1] = value >>> 16;
+      this[offset + 2] = value >>> 8;
+      this[offset + 3] = value & 255;
+      return offset + 4;
+    };
+    Buffer3.prototype.writeBigInt64LE = defineBigIntMethod(function writeBigInt64LE(value, offset = 0) {
+      return wrtBigUInt64LE(this, value, offset, -BigInt("0x8000000000000000"), BigInt("0x7fffffffffffffff"));
+    });
+    Buffer3.prototype.writeBigInt64BE = defineBigIntMethod(function writeBigInt64BE(value, offset = 0) {
+      return wrtBigUInt64BE(this, value, offset, -BigInt("0x8000000000000000"), BigInt("0x7fffffffffffffff"));
+    });
+    function checkIEEE754(buf, value, offset, ext, max, min) {
+      if (offset + ext > buf.length)
+        throw new RangeError("Index out of range");
+      if (offset < 0)
+        throw new RangeError("Index out of range");
+    }
+    function writeFloat(buf, value, offset, littleEndian, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert) {
+        checkIEEE754(buf, value, offset, 4, 34028234663852886e22, -34028234663852886e22);
+      }
+      ieee754.write(buf, value, offset, littleEndian, 23, 4);
+      return offset + 4;
+    }
+    Buffer3.prototype.writeFloatLE = function writeFloatLE(value, offset, noAssert) {
+      return writeFloat(this, value, offset, true, noAssert);
+    };
+    Buffer3.prototype.writeFloatBE = function writeFloatBE(value, offset, noAssert) {
+      return writeFloat(this, value, offset, false, noAssert);
+    };
+    function writeDouble(buf, value, offset, littleEndian, noAssert) {
+      value = +value;
+      offset = offset >>> 0;
+      if (!noAssert) {
+        checkIEEE754(buf, value, offset, 8, 17976931348623157e292, -17976931348623157e292);
+      }
+      ieee754.write(buf, value, offset, littleEndian, 52, 8);
+      return offset + 8;
+    }
+    Buffer3.prototype.writeDoubleLE = function writeDoubleLE(value, offset, noAssert) {
+      return writeDouble(this, value, offset, true, noAssert);
+    };
+    Buffer3.prototype.writeDoubleBE = function writeDoubleBE(value, offset, noAssert) {
+      return writeDouble(this, value, offset, false, noAssert);
+    };
+    Buffer3.prototype.copy = function copy(target, targetStart, start, end) {
+      if (!Buffer3.isBuffer(target))
+        throw new TypeError("argument should be a Buffer");
+      if (!start)
+        start = 0;
+      if (!end && end !== 0)
+        end = this.length;
+      if (targetStart >= target.length)
+        targetStart = target.length;
+      if (!targetStart)
+        targetStart = 0;
+      if (end > 0 && end < start)
+        end = start;
+      if (end === start)
+        return 0;
+      if (target.length === 0 || this.length === 0)
+        return 0;
+      if (targetStart < 0) {
+        throw new RangeError("targetStart out of bounds");
+      }
+      if (start < 0 || start >= this.length)
+        throw new RangeError("Index out of range");
+      if (end < 0)
+        throw new RangeError("sourceEnd out of bounds");
+      if (end > this.length)
+        end = this.length;
+      if (target.length - targetStart < end - start) {
+        end = target.length - targetStart + start;
+      }
+      const len = end - start;
+      if (this === target && typeof Uint8Array.prototype.copyWithin === "function") {
+        this.copyWithin(targetStart, start, end);
+      } else {
+        Uint8Array.prototype.set.call(
+          target,
+          this.subarray(start, end),
+          targetStart
+        );
+      }
+      return len;
+    };
+    Buffer3.prototype.fill = function fill(val, start, end, encoding) {
+      if (typeof val === "string") {
+        if (typeof start === "string") {
+          encoding = start;
+          start = 0;
+          end = this.length;
+        } else if (typeof end === "string") {
+          encoding = end;
+          end = this.length;
+        }
+        if (encoding !== void 0 && typeof encoding !== "string") {
+          throw new TypeError("encoding must be a string");
+        }
+        if (typeof encoding === "string" && !Buffer3.isEncoding(encoding)) {
+          throw new TypeError("Unknown encoding: " + encoding);
+        }
+        if (val.length === 1) {
+          const code = val.charCodeAt(0);
+          if (encoding === "utf8" && code < 128 || encoding === "latin1") {
+            val = code;
+          }
+        }
+      } else if (typeof val === "number") {
+        val = val & 255;
+      } else if (typeof val === "boolean") {
+        val = Number(val);
+      }
+      if (start < 0 || this.length < start || this.length < end) {
+        throw new RangeError("Out of range index");
+      }
+      if (end <= start) {
+        return this;
+      }
+      start = start >>> 0;
+      end = end === void 0 ? this.length : end >>> 0;
+      if (!val)
+        val = 0;
+      let i;
+      if (typeof val === "number") {
+        for (i = start; i < end; ++i) {
+          this[i] = val;
+        }
+      } else {
+        const bytes = Buffer3.isBuffer(val) ? val : Buffer3.from(val, encoding);
+        const len = bytes.length;
+        if (len === 0) {
+          throw new TypeError('The value "' + val + '" is invalid for argument "value"');
+        }
+        for (i = 0; i < end - start; ++i) {
+          this[i + start] = bytes[i % len];
+        }
+      }
+      return this;
+    };
+    var errors = {};
+    function E(sym, getMessage, Base) {
+      errors[sym] = class NodeError extends Base {
+        constructor() {
+          super();
+          Object.defineProperty(this, "message", {
+            value: getMessage.apply(this, arguments),
+            writable: true,
+            configurable: true
+          });
+          this.name = `${this.name} [${sym}]`;
+          this.stack;
+          delete this.name;
+        }
+        get code() {
+          return sym;
+        }
+        set code(value) {
+          Object.defineProperty(this, "code", {
+            configurable: true,
+            enumerable: true,
+            value,
+            writable: true
+          });
+        }
+        toString() {
+          return `${this.name} [${sym}]: ${this.message}`;
+        }
+      };
+    }
+    E(
+      "ERR_BUFFER_OUT_OF_BOUNDS",
+      function(name) {
+        if (name) {
+          return `${name} is outside of buffer bounds`;
+        }
+        return "Attempt to access memory outside buffer bounds";
+      },
+      RangeError
+    );
+    E(
+      "ERR_INVALID_ARG_TYPE",
+      function(name, actual) {
+        return `The "${name}" argument must be of type number. Received type ${typeof actual}`;
+      },
+      TypeError
+    );
+    E(
+      "ERR_OUT_OF_RANGE",
+      function(str, range, input) {
+        let msg = `The value of "${str}" is out of range.`;
+        let received = input;
+        if (Number.isInteger(input) && Math.abs(input) > 2 ** 32) {
+          received = addNumericalSeparator(String(input));
+        } else if (typeof input === "bigint") {
+          received = String(input);
+          if (input > BigInt(2) ** BigInt(32) || input < -(BigInt(2) ** BigInt(32))) {
+            received = addNumericalSeparator(received);
+          }
+          received += "n";
+        }
+        msg += ` It must be ${range}. Received ${received}`;
+        return msg;
+      },
+      RangeError
+    );
+    function addNumericalSeparator(val) {
+      let res = "";
+      let i = val.length;
+      const start = val[0] === "-" ? 1 : 0;
+      for (; i >= start + 4; i -= 3) {
+        res = `_${val.slice(i - 3, i)}${res}`;
+      }
+      return `${val.slice(0, i)}${res}`;
+    }
+    function checkBounds(buf, offset, byteLength2) {
+      validateNumber(offset, "offset");
+      if (buf[offset] === void 0 || buf[offset + byteLength2] === void 0) {
+        boundsError(offset, buf.length - (byteLength2 + 1));
+      }
+    }
+    function checkIntBI(value, min, max, buf, offset, byteLength2) {
+      if (value > max || value < min) {
+        const n = typeof min === "bigint" ? "n" : "";
+        let range;
+        if (byteLength2 > 3) {
+          if (min === 0 || min === BigInt(0)) {
+            range = `>= 0${n} and < 2${n} ** ${(byteLength2 + 1) * 8}${n}`;
+          } else {
+            range = `>= -(2${n} ** ${(byteLength2 + 1) * 8 - 1}${n}) and < 2 ** ${(byteLength2 + 1) * 8 - 1}${n}`;
+          }
+        } else {
+          range = `>= ${min}${n} and <= ${max}${n}`;
+        }
+        throw new errors.ERR_OUT_OF_RANGE("value", range, value);
+      }
+      checkBounds(buf, offset, byteLength2);
+    }
+    function validateNumber(value, name) {
+      if (typeof value !== "number") {
+        throw new errors.ERR_INVALID_ARG_TYPE(name, "number", value);
+      }
+    }
+    function boundsError(value, length, type) {
+      if (Math.floor(value) !== value) {
+        validateNumber(value, type);
+        throw new errors.ERR_OUT_OF_RANGE(type || "offset", "an integer", value);
+      }
+      if (length < 0) {
+        throw new errors.ERR_BUFFER_OUT_OF_BOUNDS();
+      }
+      throw new errors.ERR_OUT_OF_RANGE(
+        type || "offset",
+        `>= ${type ? 1 : 0} and <= ${length}`,
+        value
+      );
+    }
+    var INVALID_BASE64_RE = /[^+/0-9A-Za-z-_]/g;
+    function base64clean(str) {
+      str = str.split("=")[0];
+      str = str.trim().replace(INVALID_BASE64_RE, "");
+      if (str.length < 2)
+        return "";
+      while (str.length % 4 !== 0) {
+        str = str + "=";
+      }
+      return str;
+    }
+    function utf8ToBytes(string, units) {
+      units = units || Infinity;
+      let codePoint;
+      const length = string.length;
+      let leadSurrogate = null;
+      const bytes = [];
+      for (let i = 0; i < length; ++i) {
+        codePoint = string.charCodeAt(i);
+        if (codePoint > 55295 && codePoint < 57344) {
+          if (!leadSurrogate) {
+            if (codePoint > 56319) {
+              if ((units -= 3) > -1)
+                bytes.push(239, 191, 189);
+              continue;
+            } else if (i + 1 === length) {
+              if ((units -= 3) > -1)
+                bytes.push(239, 191, 189);
+              continue;
+            }
+            leadSurrogate = codePoint;
+            continue;
+          }
+          if (codePoint < 56320) {
+            if ((units -= 3) > -1)
+              bytes.push(239, 191, 189);
+            leadSurrogate = codePoint;
+            continue;
+          }
+          codePoint = (leadSurrogate - 55296 << 10 | codePoint - 56320) + 65536;
+        } else if (leadSurrogate) {
+          if ((units -= 3) > -1)
+            bytes.push(239, 191, 189);
+        }
+        leadSurrogate = null;
+        if (codePoint < 128) {
+          if ((units -= 1) < 0)
+            break;
+          bytes.push(codePoint);
+        } else if (codePoint < 2048) {
+          if ((units -= 2) < 0)
+            break;
+          bytes.push(
+            codePoint >> 6 | 192,
+            codePoint & 63 | 128
+          );
+        } else if (codePoint < 65536) {
+          if ((units -= 3) < 0)
+            break;
+          bytes.push(
+            codePoint >> 12 | 224,
+            codePoint >> 6 & 63 | 128,
+            codePoint & 63 | 128
+          );
+        } else if (codePoint < 1114112) {
+          if ((units -= 4) < 0)
+            break;
+          bytes.push(
+            codePoint >> 18 | 240,
+            codePoint >> 12 & 63 | 128,
+            codePoint >> 6 & 63 | 128,
+            codePoint & 63 | 128
+          );
+        } else {
+          throw new Error("Invalid code point");
+        }
+      }
+      return bytes;
+    }
+    function asciiToBytes(str) {
+      const byteArray = [];
+      for (let i = 0; i < str.length; ++i) {
+        byteArray.push(str.charCodeAt(i) & 255);
+      }
+      return byteArray;
+    }
+    function utf16leToBytes(str, units) {
+      let c, hi, lo;
+      const byteArray = [];
+      for (let i = 0; i < str.length; ++i) {
+        if ((units -= 2) < 0)
+          break;
+        c = str.charCodeAt(i);
+        hi = c >> 8;
+        lo = c % 256;
+        byteArray.push(lo);
+        byteArray.push(hi);
+      }
+      return byteArray;
+    }
+    function base64ToBytes(str) {
+      return base64.toByteArray(base64clean(str));
+    }
+    function blitBuffer(src, dst, offset, length) {
+      let i;
+      for (i = 0; i < length; ++i) {
+        if (i + offset >= dst.length || i >= src.length)
+          break;
+        dst[i + offset] = src[i];
+      }
+      return i;
+    }
+    function isInstance(obj, type) {
+      return obj instanceof type || obj != null && obj.constructor != null && obj.constructor.name != null && obj.constructor.name === type.name;
+    }
+    function numberIsNaN(obj) {
+      return obj !== obj;
+    }
+    var hexSliceLookupTable = function() {
+      const alphabet = "0123456789abcdef";
+      const table = new Array(256);
+      for (let i = 0; i < 16; ++i) {
+        const i16 = i * 16;
+        for (let j = 0; j < 16; ++j) {
+          table[i16 + j] = alphabet[i] + alphabet[j];
+        }
+      }
+      return table;
+    }();
+    function defineBigIntMethod(fn) {
+      return typeof BigInt === "undefined" ? BufferBigIntNotDefined : fn;
+    }
+    function BufferBigIntNotDefined() {
+      throw new Error("BigInt not supported");
+    }
+  }
+});
+
+// src/index.ts
+var import_buffer = __toESM(require_buffer(), 1);
+var configProviders = [
+  {
+    name: "vpei",
+    type: "b64",
+    random: true,
+    urls: [
+      "https://raw.githubusercontent.com/vpei/Free-Node-Merge/main/o/node.txt"
+    ]
+  },
+  {
+    name: "mfuu",
+    type: "b64",
+    random: true,
+    urls: [
+      "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray"
+    ]
+  },
+ {
+    name: "selected",
+    type: "raw",
+    random: false,
+    urls: [
+      "https://raw.githubusercontent.com/Ahmad-2213/v2ray-worker-sub/main/dist/links33"
+    ]
+  },
+  {
+    name: "peasoft",
+    type: "raw",
+    random: true,
+    urls: [
+      "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt"
+    ]
+  },
+  {
+    name: "ermaozi",
+    type: "b64",
+    random: true,
+    urls: [
+      "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt"
+    ]
+  },
+  {
+    name: "aiboboxx",
+    type: "b64",
+    random: true,
+    urls: [
+      "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2"
+    ]
+  },
+  {
+    name: "mahdibland",
+    type: "raw",
+    random: false,
+    urls: [
+      "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/splitted/vmess.txt",
+      "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/splitted/trojan.txt"
+    ]
+  },
+  {
+    name: "autoproxy",
+    type: "b64",
+    random: true,
+    urls: [
+      "https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription1",
+      "https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription2",
+      "https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription3",
+      "https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription4",
+      "https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription5",
+      "https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription6",
+      "https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription7",
+      "https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription8"
+    ]
+  },
+  {
+    name: "freefq",
+    type: "b64",
+    random: true,
+    urls: [
+      "https://raw.githubusercontent.com/freefq/free/master/v2"
+    ]
+  },
+  {
+    name: "pawdroid",
+    type: "b64",
+    random: true,
+    urls: [
+      "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub"
+    ]
+  }
+];
+var ipProviderLink = "https://raw.githubusercontent.com/vfarid/cf-clean-ips/main/list.json";
+var selectedTypes = SELECTED_TYPES;
+var selectedProviders = SELECTED_PROVIDERS;
+var operators = [];
+var cleanIPs = [];
+var maxConfigs = MAX_CONFIGS;
+var includeOriginalConfigs = INCLUDE_ORIGINAL;
+var onlyOriginalConfigs = ONLY_ORIGINAL;
+var alpnList = [
+  "h2,http/1.1",
+  "h2,http/1.1",
+  "h2,http/1.1",
+  "http/1.1"
+];
+var fpList = [
+  "chrome",
+  "chrome",
+  "chrome",
+  "firefox",
+  "safari",
+  "edge",
+  "ios",
+  "android",
+  "random"
+];
+var domainList = [
+  "84.47.234.19"
+];
+var src_default = {
+  async fetch(request) {
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/^\/|\/$/g, "");
+    const parts = path.split("/");
+    const type = parts[0].toLowerCase();
+    if (type === "sub") {
+      if (parts[1] !== void 0) {
+        if (parts[1].includes(".") || parts[1].includes(":")) {
+          cleanIPs = parts[1].toLowerCase().trim().split(",").map((ip2) => {
+            return { ip: ip2, operator: "IP" };
+          });
+          operators = ["IP"];
+        } else {
+          try {
+            operators = parts[1].toUpperCase().trim().split(",");
+            cleanIPs = await fetch(ipProviderLink).then((r) => r.json()).then((j) => j.ipv4);
+            cleanIPs = cleanIPs.filter((el) => operators.includes(el.operator));
+          } catch (e) {
+          }
+        }
+      }
+      if (url.searchParams.has("max")) {
+        maxConfigs = parseInt(url.searchParams.get("max"));
+        if (!maxConfigs) {
+          maxConfigs = MAX_CONFIGS;
+        }
+      }
+      if (url.searchParams.has("original")) {
+        const original = url.searchParams.get("original");
+        includeOriginalConfigs = ["1", "true", "yes", "y"].includes(original.toLowerCase());
+      }
+      if (includeOriginalConfigs && url.searchParams.has("merge")) {
+        const merge = url.searchParams.get("merge");
+        onlyOriginalConfigs = !["1", "true", "yes", "y"].includes(merge.toLowerCase());
+      }
+      if (url.searchParams.has("fp")) {
+        fpList = [url.searchParams.get("fp").toLocaleLowerCase().trim()];
+      }
+      if (url.searchParams.has("alpn")) {
+        alpnList = [url.searchParams.get("alpn").toLocaleLowerCase().trim()];
+      }
+      if (url.searchParams.has("type")) {
+        selectedTypes = url.searchParams.get("type").toLocaleLowerCase().split(",").map((s) => s.trim());
+      }
+      if (url.searchParams.has("provider")) {
+        selectedProviders = url.searchParams.get("provider").toLocaleLowerCase().split(",").map((s) => s.trim());
+      }
+      if (includeOriginalConfigs && !onlyOriginalConfigs) {
+        maxConfigs = Math.floor(maxConfigs / 2);
+      }
+      var configList = [];
+      var acceptableConfigList = [];
+      var finalConfigList = [];
+      var newConfigs;
+      const configPerList = Math.floor(maxConfigs / configProviders.length);
+      for (const sub of configProviders) {
+        try {
+          if (selectedProviders.length > 0 && !selectedProviders.includes(sub.name)) {
+            continue;
+          }
+          newConfigs = [];
+          for (const link of sub.urls) {
+            var content = await fetch(link).then((r) => r.text());
+            if (sub.type === "b64") {
+              content = import_buffer.Buffer.from(content, "base64").toString("utf-8");
+            }
+            newConfigs.push(content);
+          }
+          newConfigs = newConfigs.join("\n").split("\n");
+          if (!onlyOriginalConfigs) {
+            acceptableConfigList.push({
+              name: sub.name,
+              random: sub.random,
+              count: configPerList,
+              configs: newConfigs.filter((cnf) => cnf.match(/^(vmess|vless|trojan):\/\//i)),
+              mergedConfigs: null
+            });
+          }
+          if (includeOriginalConfigs) {
+            configList.push({
+              name: sub.name,
+              random: sub.random,
+              count: configPerList,
+              configs: newConfigs.filter((cnf) => cnf.match(new RegExp(`(${selectedTypes.join("|")})`, "i"))),
+              renamesConfigs: null
+            });
+          }
+        } catch (e) {
+        }
+      }
+      var ipList = [];
+      if (!cleanIPs.length) {
+        operators = ["General"];
+        cleanIPs = [{ ip: "", operator: "General" }];
+      }
+      for (const operator of operators) {
+        var ipList = cleanIPs.filter((el) => el.operator == operator).slice(0, 5);
+        var ip = ipList[Math.floor(Math.random() * ipList.length)].ip;
+        for (const i2 in acceptableConfigList) {
+          const el = acceptableConfigList[i2];
+          acceptableConfigList[i2].mergedConfigs = el.configs.map(decodeConfig).map((cnf) => mixConfig(cnf, url, ip, operator, el.name)).filter((cnf) => !!cnf && cnf.id).map(encodeConfig).filter((cnf) => !!cnf);
+        }
+        var remaining = 0;
+        for (var i = 0; i < 5; i++) {
+          for (const el of acceptableConfigList) {
+            if (el.count > el.mergedConfigs.length) {
+              remaining = remaining + el.count - el.mergedConfigs.length;
+              el.count = el.mergedConfigs.length;
+            } else if (el.count < el.mergedConfigs.length && remaining > 0) {
+              el.count = el.count + Math.ceil(remaining / 3);
+              remaining = remaining - Math.ceil(remaining / 3);
+            }
+          }
+        }
+        for (const el of acceptableConfigList) {
+          finalConfigList = finalConfigList.concat(
+            el.random ? getMultipleRandomElements(el.mergedConfigs, el.count) : el.mergedConfigs.slice(0, el.count)
+          );
+        }
+      }
+      if (includeOriginalConfigs) {
+        for (const i2 in configList) {
+          const el = configList[i2];
+          configList[i2].renamedConfigs = el.configs.map(decodeConfig).map((cnf) => renameConfig(cnf, el.name)).filter((cnf) => !!cnf && cnf.id).map(encodeConfig).filter((cnf) => !!cnf);
+        }
+        var remaining = 0;
+        for (var i = 0; i < 5; i++) {
+          for (const el of configList) {
+            if (el.count > el.renamedConfigs.length) {
+              remaining = remaining + el.count - el.renamedConfigs.length;
+              el.count = el.renamedConfigs.length;
+            } else if (el.count < el.renamedConfigs.length && remaining > 0) {
+              el.count = el.count + Math.ceil(remaining / 3);
+              remaining = remaining - Math.ceil(remaining / 3);
+            }
+          }
+        }
+        for (const el of configList) {
+          finalConfigList = finalConfigList.concat(
+            el.random ? getMultipleRandomElements(el.renamedConfigs, el.count) : el.renamedConfigs.slice(0, el.count)
+          );
+        }
+      }
+      return new Response(import_buffer.Buffer.from(finalConfigList.join("\n"), "utf-8").toString("base64"));
+    } else if (path) {
+      const addrPath = url.pathname.replace(/^\/|\/$/g, "");
+      const newUrl = new URL("https://" + addrPath);
+      return fetch(new Request(newUrl, request));
+    } else {
+      return new Response(`<!DOCTYPE html>
+<body dir="rtl">
+  <h3><font color="green">\u0647\u0645\u0647 \u0686\u06CC \u062F\u0631\u0633\u062A\u0647</font></h3>
+  <p />
+  <p>
+    \u0627\u06CC\u0646 \u0644\u06CC\u0646\u06A9 sub \u0631\u0627 \u062F\u0631 \u0627\u067E v2ray \u062E\u0648\u062F \u0628\u0647 \u0634\u06A9\u0644 \u0632\u06CC\u0631 \u06A9\u067E\u06CC \u06A9\u0646\u06CC\u062F. \u062F\u0631 \u0627\u06CC\u0646 \u0635\u0648\u0631\u062A \u06CC\u06A9 \u062F\u0627\u0645\u06CC\u0646 \u0627\u062A\u0641\u0627\u0642\u06CC \u0627\u0632 \u062E\u0648\u062F \u0648\u0631\u06A9\u0631 \u0628\u0647 \u0639\u0646\u0648\u0627\u0646 \u0622\u06CC\u200C\u067E\u06CC \u062A\u0645\u06CC\u0632 \u0627\u0646\u062A\u062E\u0627\u0628 \u0634\u062F\u0647 \u0648 \u0631\u0648\u06CC \u0628\u06CC\u0634\u062A\u0631 \u0627\u0648\u067E\u0631\u0627\u062A\u0648\u0631\u0647\u0627 \u0628\u0627 \u06A9\u06CC\u0641\u06CC\u062A \u062E\u0648\u0628 \u067E\u0627\u0633\u062E \u062E\u0648\u0627\u0647\u062F \u062F\u0627\u062F:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub">https://${url.hostname}/sub</a>
+  </p>
+  <p>
+    \u0627\u06CC\u0646 \u0644\u06CC\u0646\u06A9 sub \u0631\u0627 \u0647\u0645\u0631\u0627\u0647 \u0628\u0627 \u06A9\u062F \u0627\u067E\u0631\u0627\u062A\u0648\u0631 \u062F\u0631 \u0627\u067E v2ray \u062E\u0648\u062F \u06A9\u067E\u06CC \u06A9\u0646\u06CC\u062F. \u0628\u0631\u0627\u06CC \u0645\u062B\u0627\u0644 \u062F\u0631 \u0647\u0645\u0631\u0627\u0647 \u0627\u0648\u0644 \u0628\u0647 \u0634\u06A9\u0644 \u0632\u06CC\u0631 \u062E\u0648\u0627\u0647\u062F \u0628\u0648\u062F:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub/mci">https://${url.hostname}/sub/mci</a>
+  </p>
+  <p>
+    \u0648 \u06CC\u0627 \u0647\u0645\u06CC\u0646 \u0644\u06CC\u0646\u06A9 \u0631\u0627 \u0647\u0645\u0631\u0627\u0647 \u0622\u06CC\u200C\u067E\u06CC \u062A\u0645\u06CC\u0632 \u062F\u0631 \u0627\u067E \u062E\u0648\u062F \u0627\u0636\u0627\u0641\u0647 \u06A9\u0646\u06CC\u062F:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub/1.2.3.4">https://${url.hostname}/sub/1.2.3.4</a>
+  </p>
+  <p>
+    \u0645\u06CC\u200C\u062A\u0648\u0627\u0646\u06CC\u062F \u0686\u0646\u062F \u0622\u06CC\u200C\u067E\u06CC \u062A\u0645\u06CC\u0632 \u0631\u0627 \u0628\u0627 \u06A9\u0627\u0645\u0627 \u062C\u062F\u0627 \u06A9\u0646\u06CC\u062F. \u062F\u0631 \u0627\u06CC\u0646 \u0635\u0648\u0631\u062A \u0628\u0631\u0627\u06CC \u0647\u0631 \u0622\u06CC\u200C\u067E\u06CC \u062A\u0645\u06CC\u0632 \u0628\u0647 \u062A\u0639\u062F\u0627\u062F \u0642\u062F\u06CC\u062F \u0634\u062F\u0647\u060C \u06A9\u0627\u0646\u0641\u06CC\u06A9 \u062A\u0631\u06A9\u06CC\u0628 \u0634\u062F\u0647 \u0628\u0627 \u0648\u0631\u06A9\u0631 \u062A\u062D\u0648\u06CC\u0644 \u0645\u06CC \u062F\u0647\u062F:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub/1.2.3.4,9.8.7.6">https://${url.hostname}/sub/1.2.3.4,9.8.7.6</a>
+  </p>
+  <p>
+    \u062F\u0642\u06CC\u0642\u0627 \u0628\u0627 \u0647\u0645\u06CC\u0646 \u0645\u062F\u0644 \u0645\u06CC\u200C\u062A\u0648\u0627\u0646\u06CC\u062F \u062F\u0627\u0645\u06CC\u0646 \u0622\u06CC\u200C\u067E\u06CC \u062A\u0645\u06CC\u0632 \u0646\u06CC\u0632 \u0627\u0633\u062A\u0641\u0627\u062F\u0647 \u06A9\u0646\u06CC\u062F:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub/mci.ircf.space">https://${url.hostname}/sub/mci.ircf.space</a>
+  </p>
+  <p>
+    \u0645\u06CC\u200C\u062A\u0648\u0627\u0646\u06CC\u062F \u0627\u0632 \u0686\u0646\u062F \u0633\u0627\u0628\u062F\u0627\u0645\u0646\u06CC\u0646 \u0622\u06CC\u0621\u06CC \u062A\u0645\u06CC\u0632 \u0646\u06CC\u0632 \u0627\u0633\u062A\u0641\u0627\u062F\u0647 \u06A9\u0646\u06CC\u062F:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub/mci.ircf.space,my.domain.me">https://${url.hostname}/sub/mci.ircf.space,my.domain.me</a>
+  </p>
+  <p>
+    \u0645\u06CC\u200C\u062A\u0648\u0627\u0646\u06CC\u062F \u0628\u0627 \u0645\u062A\u063A\u06CC\u0631 max \u062A\u0639\u062F\u0627\u062F \u06A9\u0627\u0646\u0641\u06CC\u06AF \u0631\u0627 \u0645\u0634\u062E\u0635 \u06A9\u0646\u06CC\u062F:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub?max=200">https://${url.hostname}/sub?max=200</a>
+  </p>
+  <p>
+    \u0647\u0645\u0686\u0646\u06CC\u0646 \u0645\u06CC\u200C\u062A\u0648\u0627\u0646\u06CC\u062F \u0628\u0627 \u0645\u062A\u063A\u06CC\u0631 original \u0628\u0627 \u0639\u062F\u062F 0 \u06CC\u0627 1 \u0648 \u06CC\u0627 \u0628\u0627 yes/no \u0645\u0634\u062E\u0635 \u06A9\u0646\u06CC\u062F \u06A9\u0647 \u06A9\u0627\u0646\u0641\u06CC\u06AF\u200C\u0647\u0627\u06CC \u0627\u0635\u0644\u06CC (\u062A\u0631\u06A9\u06CC\u0628 \u0646\u0634\u062F\u0647 \u0628\u0627 \u0648\u0631\u06A9\u0631) \u0647\u0645 \u062F\u0631 \u062E\u0631\u0648\u062C\u06CC \u0622\u0648\u0631\u062F\u0647 \u0634\u0648\u0646\u062F \u06CC\u0627 \u0646\u0647:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub/1.2.3.4?max=200&original=yes">https://${url.hostname}/sub/1.2.3.4?max=200&original=yes</a>
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub?max=200&original=0">https://${url.hostname}/sub?max=200&original=0</a>
+  </p>
+  <p>
+    \u062F\u0631 \u0635\u0648\u0631\u062A \u0644\u0632\u0648\u0645 \u0645\u06CC \u062A\u0648\u0627\u0646\u06CC\u062F \u0628\u0627 \u0645\u062A\u063A\u06CC\u0631 merge \u0645\u0634\u062E\u0635 \u06A9\u0646\u06CC\u062F \u06A9\u0647 \u06A9\u0627\u0646\u0641\u06CC\u06AF\u200C\u0647\u0627\u06CC \u062A\u0631\u06A9\u06CC\u0628\u06CC \u062D\u0630\u0641 \u0634\u0648\u0646\u062F:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub?max=200&original=yes&merge=no">https://${url.hostname}/sub?max=200&original=yes&merge=no</a>
+  </p>
+  <p>
+    \u0647\u0645\u0686\u0646\u06CC\u0646 \u0645\u06CC\u200C\u062A\u0648\u0627\u0646\u06CC\u062F fp \u0648 alpn \u0631\u0627 \u0646\u06CC\u0632 \u0645\u0634\u062E\u0635 \u06A9\u0646\u06CC\u062F:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub?max=200&fp=chrome&alpn=h2,http/1.1">https://${url.hostname}/sub?max=200&fp=chrome&alpn=h2,http/1.1</a>
+  </p>
+  <p>
+    \u062F\u0631 \u0635\u0648\u0631\u062A \u0646\u06CC\u0627\u0632 \u0645\u06CC\u200C\u062A\u0648\u0627\u0646\u06CC\u062F \u0628\u0631\u0627\u06CC \u06A9\u0627\u0646\u0641\u06CC\u06AF\u200C\u0647\u0627\u06CC \u0627\u0635\u0644\u06CC\u060C \u062A\u0639\u06CC\u06CC\u0646 \u06A9\u0646\u06CC\u062F \u06A9\u0647 \u06A9\u062F\u0627\u0645 \u0646\u0648\u0639 \u0627\u0632 \u06A9\u0627\u0646\u0641\u06CC\u06AF\u200C\u0647\u0627 \u0631\u0627 \u0628\u0631\u0627\u06CC \u0634\u0645\u0627 \u0644\u06CC\u0633\u062A \u06A9\u0646\u062F:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub?max=200&type=vmess,ss,ssr,vless">https://${url.hostname}/sub?max=200&type=vmess,ss,ssr,vless</a>
+  </p>
+  <p>
+    \u062F\u0631 \u0635\u0648\u0631\u062A \u0646\u06CC\u0627\u0632 \u0645\u06CC\u200C\u062A\u0648\u0627\u0646\u06CC\u062F \u0644\u06CC\u0633\u062A \u067E\u0631\u0648\u0648\u0627\u06CC\u062F\u0631\u0647\u0627 \u0631\u0627 \u0645\u062D\u062F\u0648\u062F \u06A9\u0646\u06CC\u062F:
+  </p>
+  <p>
+    <a href="https://${url.hostname}/sub?provider=mahdibland,vpei">https://${url.hostname}/sub?provider=mahdibland,vpei</a>
+  </p>
+</body>`, {
         headers: {
-            Host: ""
-        },
-        path: "/",
-        type: "ws"
-    },
-    tag: ""
-};
-
-const xrayWgOutboundTemp = {
-    protocol: "wireguard",
-    settings: {
-        address: [],
-        mtu: 1280,
-        peers: [
-            {
-                endpoint: "engage.cloudflareclient.com:2408",
-                publicKey: ""
-            }
-        ],
-        reserved: [],
-        secretKey: "",
-        keepAlive: 10
-    },
-    streamSettings: {
-        sockopt: {
-            dialerProxy: ""
+          "content-type": "text/html;charset=UTF-8"
         }
-    },
-    tag: "proxy"
+      });
+    }
+  }
 };
-
-const singboxWgOutboundTemp = {
-    local_address: [],
-    mtu: 1280,
-    peer_public_key: "",
-    pre_shared_key: "",
-    private_key: "",
-    reserved: "",
-    server: "engage.cloudflareclient.com",
-    server_port: 2408,
-    type: "wireguard",
-    domain_strategy: "prefer_ipv6",
-    detour: "",
-    tag: ""
+function encodeConfig(conf) {
+  var configStr = null;
+  try {
+    if (conf.protocol === "vmess") {
+      delete conf.protocol;
+      configStr = "vmess://" + import_buffer.Buffer.from(JSON.stringify(conf), "utf-8").toString("base64");
+    } else if (["vless", "trojan"].includes(conf?.protocol)) {
+      configStr = `${conf.protocol}://${conf.id}@${conf.add}:${conf.port}?security=${conf.tls}&type=${conf.net}&path=${encodeURIComponent(conf.path)}&host=${encodeURIComponent(conf.host)}&tls=${conf.tls}&sni=${conf.sni}#${encodeURIComponent(conf.ps)}`;
+    }
+  } catch (e) {
+  }
+  return configStr;
+}
+function decodeConfig(configStr) {
+  var match = null;
+  var conf = null;
+  if (configStr.startsWith("vmess://")) {
+    try {
+      conf = JSON.parse(import_buffer.Buffer.from(configStr.substring(8), "base64").toString("utf-8"));
+      conf.protocol = "vmess";
+    } catch (e) {
+    }
+  } else if (match = configStr.match(/^(?<protocol>trojan|vless):\/\/(?<id>.*)@(?<add>.*):(?<port>\d+)\??(?<options>.*)#(?<ps>.*)$/)) {
+    try {
+      const optionsArr = match.groups.options.split("&") ?? [];
+      const optionsObj = optionsArr.reduce((obj, option) => {
+        const [key, value] = option.split("=");
+        obj[key] = decodeURIComponent(value);
+        return obj;
+      }, {});
+      conf = {
+        protocol: match.groups.protocol,
+        id: match.groups.id,
+        add: match.groups?.add,
+        port: match.groups.port ?? 443,
+        ps: match.groups?.ps,
+        net: optionsObj.type ?? (optionsObj.net ?? "tcp"),
+        host: optionsObj?.host,
+        path: optionsObj?.path,
+        tls: optionsObj.security ?? "none",
+        sni: optionsObj?.sni,
+        alpn: optionsObj?.alpn
+      };
+    } catch (e) {
+    }
+  }
+  return conf;
+}
+function mixConfig(conf, url, ip, operator, provider) {
+  try {
+    if (conf.tls != "tls" || conf.net == "tcp") {
+      return {};
+    }
+    var addr = conf.sni;
+    if (!addr) {
+      if (conf.host && !isIp(conf.host)) {
+        addr = conf.host;
+      } else if (conf.add && !isIp(conf.add)) {
+        addr = conf.add;
+      }
+    }
+    if (!addr) {
+      return {};
+    }
+    if (addr.endsWith(".workers.dev")) {
+      const part1 = conf.path.split("/").pop();
+      const part2 = conf.path.substring(0, conf.path.length - part1.length - 1);
+      var path;
+      if (part1.includes(":")) {
+        addr = part1.replace(/^\//g, "").split(":");
+        conf.port = parseInt(addr[1]);
+        addr = addr[0];
+        path = "/" + part2.replace(/^\//g, "");
+      } else if (part2.includes(":")) {
+        addr = part2.replace(/^\//g, "").split(":");
+        conf.port = parseInt(addr[1]);
+        addr = addr[0];
+        path = "/" + part1.replace(/^\//g, "");
+      } else if (part1.includes(".")) {
+        addr = part1.replace(/^\//g, "");
+        conf.port = 443;
+        path = "/" + part2.replace(/^\//g, "");
+      } else {
+        addr = part2.replace(/^\//g, "");
+        conf.port = 443;
+        path = "/" + part1.replace(/^\//g, "");
+      }
+      conf.path = path;
+    }
+    conf.ps = conf?.ps ? conf.ps : conf.name;
+    if (provider) {
+      conf.ps = provider + "-" + conf.ps;
+    }
+    conf.ps = conf.ps + "-worker-" + operator.toLocaleLowerCase();
+    conf.name = conf.ps;
+    conf.host = url.hostname;
+    conf.sni = url.hostname;
+    if (ip) {
+      conf.add = ip;
+    } else {
+      conf.add = domainList[Math.floor(Math.random() * domainList.length)];
+    }
+    if (conf?.port != 443) {
+      return {};
+    }
+    conf.path = "/" + addr + (conf?.path ? "/" + conf.path.replace(/^\//g, "") : "");
+    conf.alpn = alpnList[Math.floor(Math.random() * alpnList.length)];
+    conf.fp = fpList[Math.floor(Math.random() * fpList.length)];
+    conf.utls = conf.fp;
+    return conf;
+  } catch (e) {
+    return {};
+  }
+}
+function renameConfig(conf, provider) {
+  try {
+    conf.ps = conf?.ps ? conf.ps : conf.name;
+    conf.ps = provider + "-" + conf.ps;
+    return conf;
+  } catch (e) {
+    return {};
+  }
+}
+function getMultipleRandomElements(arr, num) {
+  var shuffled = arr.slice(0, num * 2).sort(() => 0.5 - Math.random());
+  return shuffled.slice(0, num);
+}
+function isIp(str) {
+  try {
+    if (str == "" || str == void 0)
+      return false;
+    if (!/^(\d{1,2}|1\d\d|2[0-4]\d|25[0-5])(\.(\d{1,2}|1\d\d|2[0-4]\d|25[0-5])){2}\.(\d{1,2}|1\d\d|2[0-4]\d|25[0-4])$/.test(str)) {
+      return false;
+    }
+    var ls = str.split(".");
+    if (ls == null || ls.length != 4 || ls[3] == "0" || parseInt(ls[3]) === 0) {
+      return false;
+    }
+    return true;
+  } catch (e) {
+  }
+  return false;
+}
+export {
+  src_default as default
 };
+//# sourceMappingURL=index.js.map
