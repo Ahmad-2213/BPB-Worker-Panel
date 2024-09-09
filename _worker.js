@@ -1975,7 +1975,7 @@ var configProviders = [
     type: "b64",
     random: true,
     urls: [
-      "https://raw.githubusercontent.com/JieErJingFu/FreeNodesV2RayorTrojan_20210113-/main/EncryptedFreeNodes.txt"
+      "https://raw.githubusercontent.com/mermeroo/V2RAY-and-CLASH-Subscription-Links/main/SUB%20LINKS"
     ]
   },
   {
