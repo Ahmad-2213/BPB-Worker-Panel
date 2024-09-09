@@ -1970,7 +1970,7 @@ var configProviders = [
       "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/splitted/vmess.txt",
     ]
   },
- {
+  {
     name: "Epodonios",
     type: "raw",
     random: false,
