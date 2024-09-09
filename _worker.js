@@ -1968,7 +1968,14 @@ var configProviders = [
     random: false,
     urls: [
       "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/splitted/vmess.txt",
-      "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/splitted/trojan.txt"
+    ]
+  },
+ {
+    name: "Epodonios",
+    type: "raw",
+    random: false,
+    urls: [
+      "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vmess.txt"
     ]
   },
   {
