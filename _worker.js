@@ -1971,11 +1971,11 @@ var configProviders = [
     ]
   },
   {
-    name: "crazygeeky",
+    name: "freenode",
     type: "b64",
     random: true,
     urls: [
-      "https://proxy.crazygeeky.com/vmess/sub"
+      "https://getafreenode.com/subscribe/?uuid=441e8e39-ac33-4670-91b4-252cd189ad6d"
     ]
   },
   {
