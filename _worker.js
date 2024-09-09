@@ -1972,10 +1972,10 @@ var configProviders = [
   },
   {
     name: "freenode",
-    type: "raw",
+    type: "b64",
     random: true,
     urls: [
-      "https://raw.githubusercontent.com/resasanian/Mirza/main/mirza-vmess.txt"
+      "https://raw.githubusercontent.com/JieErJingFu/FreeNodesV2RayorTrojan_20210113-/main/EncryptedFreeNodes.txt"
     ]
   },
   {
