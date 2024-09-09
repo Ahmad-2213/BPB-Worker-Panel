@@ -1971,11 +1971,11 @@ var configProviders = [
     ]
   },
   {
-    name: "barryfar",
+    name: "mheidari98",
     type: "b64",
     random: true,
     urls: [
-      "https://raw.githubusercontent.com/barry-far/V2ray-Configs/main/Splitted-By-Protocol/vmess.txt"
+      "https://raw.githubusercontent.com/mheidari98/.proxy/main/vmess"
     ]
   },
   {
