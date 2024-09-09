@@ -1975,7 +1975,7 @@ var configProviders = [
     type: "b64",
     random: true,
     urls: [
-      "https://getafreenode.com/subscribe/?uuid=441e8e39-ac33-4670-91b4-252cd189ad6d"
+      "https://raw.githubusercontent.com/resasanian/Mirza/main/mirza-vmess.txt"
     ]
   },
   {
