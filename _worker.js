@@ -1971,11 +1971,11 @@ var configProviders = [
     ]
   },
   {
-    name: "mheidari98",
+    name: "crazygeeky",
     type: "b64",
     random: true,
     urls: [
-      "https://raw.githubusercontent.com/mheidari98/.proxy/main/vmess"
+      "https://proxy.crazygeeky.com/vmess/sub"
     ]
   },
   {
