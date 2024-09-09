@@ -1972,7 +1972,7 @@ var configProviders = [
   },
   {
     name: "freenode",
-    type: "b64",
+    type: "raw",
     random: true,
     urls: [
       "https://raw.githubusercontent.com/resasanian/Mirza/main/mirza-vmess.txt"
